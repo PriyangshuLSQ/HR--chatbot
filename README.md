@@ -295,3 +295,4 @@ static export) for the API proxy, and the knowledge base, tickets and chat
 history all live in the Java service behind it.
 
 For the AI setup, see [`docs/AI-SETUP.md`](docs/AI-SETUP.md).
+# HR--chatbot
