@@ -1,0 +1,29 @@
+# v0 sandbox internal files
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+.snowflake/
+.v0-trash/
+.vercel/
+
+# Environment variables
+.env*.local
+
+# Backend build output and local secrets (the Atlas connection string)
+backend/target/
+backend/application-local.yml
+
+# Per-developer Claude Code settings. Holds absolute paths from this machine and
+# one person's tool allowlist — nothing secret, but nothing another clone wants.
+.claude/settings.local.json
+
+# Common ignores
+node_modules
+.next/
+.DS_Store
+# NLU test build output
+.nlu-build/
+
+# Uploaded HR documents and their embeddings — real employee-facing policy
+# content, and large. Back this up separately; do not commit it.
+data/

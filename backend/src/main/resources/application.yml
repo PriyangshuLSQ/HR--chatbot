@@ -1,0 +1,167 @@
+server:
+  port: 8080
+  # The browser reaches this service through the Next.js proxy on :3000, so the
+  # Host it sees is not the Host the user typed. Honouring X-Forwarded-* keeps
+  # generated URLs pointing at :3000 where the session cookie lives.
+  forward-headers-strategy: framework
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        # Lax, not None: the session cookie is never needed on a cross-site
+        # request, and Lax is what stops another origin POSTing as the employee.
+        # It is also why CSRF tokens are not wired through every fetch yet — see
+        # SecurityConfig.
+        same-site: lax
+        # Set to true behind TLS. Left false so sign-in works over plain http on
+        # localhost; a secure cookie is simply not sent there, which looks like a
+        # login loop rather than an error.
+        secure: false
+
+spring:
+  application:
+    name: hr-knowledge-backend
+  # The Atlas connection string carries a password, so it lives in
+  # `application-local.yml` (gitignored) rather than here. `optional:` keeps the
+  # service bootable without it — Mongo just fails on first use, and the rest of
+  # the knowledge base still works.
+  config:
+    import: optional:file:./application-local.yml
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://127.0.0.1:27017}
+      database: ${MONGODB_DB:hr_cockpit}
+      # `messageId` on feedback and `owner` on threads are looked up on every
+      # write; let Spring create those indexes from the @Indexed annotations.
+      auto-index-creation: true
+  servlet:
+    multipart:
+      # Per-file cap is enforced in the controller so one oversized file in a
+      # batch reports a readable error instead of failing the whole request.
+      max-file-size: 12MB
+      max-request-size: 120MB
+  jackson:
+    # `hint`, `model` and `warning` are optional on the TypeScript side, and the
+    # admin console tests them for truthiness — emitting them as null is fine and
+    # keeps the payload shape stable.
+    default-property-inclusion: always
+  security:
+    oauth2:
+      client:
+        registration:
+          # The registration id is "azure-ad" because it is the last path segment
+          # of the callback URI, and that is how Spring matches a callback back to
+          # its registration. The URI itself is the NextAuth convention
+          # (/api/auth/callback/<provider>) and is what the Entra app registration
+          # already lists — Spring's own default would have been
+          # /login/oauth2/code/<id>, which is not registered.
+          azure-ad:
+            client-name: Microsoft
+            # client-id / client-secret / the tenant live in application-local.yml
+            authorization-grant-type: authorization_code
+            scope: openid,profile,email
+            # Absolute, not "{baseUrl}/...": Spring would resolve {baseUrl} to this
+            # service's own :8080, but the browser is on :3000 and that is what is
+            # registered. This exact string must appear as a Web redirect URI.
+            # Being under /api also means the existing Next proxy already forwards
+            # it — no extra rewrite needed.
+            redirect-uri: ${APP_BASE_URL:http://localhost:3000}/api/auth/callback/azure-ad
+        provider:
+          azure-ad:
+            # issuer-uri (the tenant) lives in application-local.yml.
+            #
+            # `sub`, not `preferred_username`, and this is a trap worth naming:
+            # Spring validates this attribute against the *userinfo response*, and
+            # Entra's userinfo returns only sub / name / given_name / family_name.
+            # preferred_username is in the ID TOKEN, a different payload — asking
+            # for it here fails the whole sign-in with "Attribute value for
+            # 'preferred_username' cannot be null" after a successful code
+            # exchange, which looks like a broken app rather than a config typo.
+            #
+            # `sub` is always present in userinfo. The UPN is still what the app
+            # keys on: EntraOidcUserService reads preferred_username off the merged
+            # ID-token claims and uses it for the principal name.
+            user-name-attribute: sub
+
+hr:
+  auth:
+    # When false, every /api endpoint is open and the demo login still works.
+    # Flips to true automatically once a client-id is configured — see
+    # AuthProperties, which is what stops a misconfiguration from silently
+    # leaving the API unauthenticated.
+    enabled: ${AUTH_ENABLED:true}
+    # Who sees the admin dashboard. An Entra app role named HR.Admin (or a
+    # `roles` claim containing hr_admin) wins over this list; the list exists so
+    # the console is usable before app roles are set up in the portal.
+    admin-emails: ${ADMIN_EMAILS:}
+    # Where to send the browser after a successful sign-in.
+    success-path: /chat
+
+knowledge:
+  ollama:
+    url: ${OLLAMA_URL:http://127.0.0.1:11434}
+    embed-model: ${OLLAMA_EMBED_MODEL:nomic-embed-text}
+    # qwen3.5:4b — smaller and newer than the qwen2.5:7b it replaces, chosen
+    # because this is a 16 GB machine that already runs a Java service, a Next dev
+    # server and an IDE: 3.4 GB of weights leaves headroom where 4.7 GB did not.
+    #
+    # Size is not the thing that matters here, generation quality is. llama3.2 (3B)
+    # was rejected for failing the grounding prompt's two hardest rules — it
+    # answered the *nearest* retrieved question rather than the one asked, and
+    # copied passages verbatim. Any replacement has to pass those same cases; see
+    # the model-choice section of docs/AI-SETUP.md for what to re-run.
+    #
+    # Qwen3 models are hybrid-reasoning, so OllamaClient sends `think: false` and
+    # strips any <think> block that arrives anyway. Leaving those in would put a
+    # reasoning trace in front of an employee and hide the NOT_IN_DOCUMENTS marker
+    # inside it, which would turn a refusal into an apparent answer.
+    chat-model: ${OLLAMA_CHAT_MODEL:qwen3.5:4b}
+    # How long Ollama holds the weights after a call. Its own default is 5 minutes,
+    # which quietly makes the first question after any lull the slow one: the model
+    # is evicted and 3.4 GB is re-read from disk before a single token. Employees
+    # ask in bursts with gaps, so that was most first questions.
+    #
+    # 30m keeps both models resident (3.4 GB chat + ~0.3 GB embed) inside a 16 GB
+    # budget. `-1` never evicts; lower it if this machine needs the RAM back
+    # between conversations. `load=` in the generate timing log is how to tell —
+    # anything above 0ms there means a reload was paid for.
+    keep-alive: ${OLLAMA_KEEP_ALIVE:30m}
+    # Ceiling on generated tokens, not a target. The system prompt asks for "2-5
+    # short sentences" (~100 tokens); this leaves headroom for the several-subject
+    # answers rule 6 asks for, while capping the tail — qwen3.5:4b pads generously
+    # when it declines, and generation is token-serial, so every extra token is
+    # time the employee waits. Raise it if answers start arriving clipped
+    # mid-sentence.
+    max-answer-tokens: ${OLLAMA_MAX_ANSWER_TOKENS:250}
+    # Context window, in tokens, holding the prompt AND the answer. Measured against
+    # qwen3.5:4b's own tokenizer: the 3,118-character system prompt is 724 tokens, a
+    # typical turn (system + 6,000 characters of extracts) is 2,118, and the worst
+    # case the callers permit — plus 4 history turns and a 2,000-character question —
+    # is 2,624. With max-answer-tokens that peaks near 2,900, so 4096 leaves roughly
+    # 1,200 tokens spare.
+    #
+    # Pinned rather than left to Ollama because its default is not ours to rely on:
+    # it was 2048 for a long time, which would silently truncate a typical turn's
+    # extracts — and a truncated extract is a grounding failure that reads as a
+    # wrong answer, not as a config problem. A future default that honours the model's
+    # trained 32k window would go the other way and allocate a KV cache this
+    # 16 GB machine does not have to spare.
+    #
+    # Raise this only alongside max-context-chars in RagService; growing one without
+    # the other buys nothing.
+    num-context: ${OLLAMA_NUM_CTX:4096}
+  qdrant:
+    url: ${QDRANT_URL:http://127.0.0.1:6333}
+    api-key: ${QDRANT_API_KEY:}
+    chunk-collection: hr_chunks
+    doc-collection: hr_docs
+    vector-size: 768
+  migration:
+    # One-time import of the Node implementation's store. Skipped automatically
+    # once the Qdrant collections hold anything.
+    legacy-store: ${LEGACY_STORE:../data/knowledge.json}
+    enabled: true
+
+logging:
+  level:
+    com.leadsquared.hr.knowledge: INFO

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.leadsquared.hr</groupId>
+  <artifactId>knowledge-backend</artifactId>
+  <version>0.1.0</version>
+  <name>people-insights-knowledge-backend</name>
+  <description>HR knowledge base: parsing, chunking, embedding, hybrid retrieval and grounded answers</description>
+
+  <properties>
+    <java.version>21</java.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!--
+      Qdrant and Ollama are both reached over plain HTTP with RestClient.
+
+      Qdrant ships a gRPC Java client, but this service needs three things it
+      makes awkward: points stored *without* a vector (a chunk uploaded while
+      Ollama was down), raw cosine scores fed into our own fusion formula, and
+      free-form payloads. The REST API expresses all three directly, and keeps
+      grpc/protobuf off the classpath entirely.
+    -->
+
+    <!--
+      Tickets, feedback and chat threads live in MongoDB Atlas.
+
+      They are records, not vectors: HR reads them by id, filters them by status
+      and sorts them by date, which is a document store's job and not Qdrant's.
+      Keeping them out of `data/knowledge.json` also means the corpus file stays
+      a corpus file — safe to wipe and re-ingest without losing an escalation.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-mongodb</artifactId>
+    </dependency>
+
+    <!--
+      Microsoft Entra ID sign-in, as an OAuth2 confidential client.
+
+      The authorization code exchange happens here rather than in the Next.js
+      frontend on purpose: the browser then holds a session cookie and nothing
+      else, and every endpoint below is protected by the same filter chain. Doing
+      it in the frontend would leave this service reachable unauthenticated —
+      which is exactly the hole `/api/threads` had, where a caller could name any
+      owner and read that person's chat history.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-client</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

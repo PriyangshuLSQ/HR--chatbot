@@ -1,0 +1,802 @@
+@import 'tailwindcss';
+
+/* ==========================================================================
+   Design tokens
+   Light and dark are both selected — dark is not an automatic inversion.
+   Chart colors come from the validated data-viz palette; the categorical
+   slot-1 blue carries magnitude, and status hues are reserved for state
+   (always paired with an icon + label, never color alone).
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --surface-3: #e8ebf0;
+  --card: #ffffff;
+  --card-foreground: #10131a;
+
+  --foreground: #10131a;
+  --foreground-secondary: #4a5160;
+  --muted: #f2f4f7;
+  --muted-foreground: #6b7383;
+  --faint: #9aa1ae;
+
+  --primary: #2a78d6;
+  --primary-hover: #256abf;
+  --primary-soft: #eaf2fd;
+  --primary-foreground: #ffffff;
+
+  --border: #e2e6ec;
+  --border-strong: #cfd5de;
+  --ring: rgba(42, 120, 214, 0.35);
+
+  /* Reserved status hues — never reused as series colors. */
+  --success: #0ca30c;
+  --success-soft: #e7f7e7;
+  --success-ink: #056605;
+  --warning: #fab219;
+  --warning-soft: #fef4e0;
+  --warning-ink: #8a5d00;
+  --error: #d03b3b;
+  --error-soft: #fdeaea;
+  --error-ink: #a02020;
+  --info: #2a78d6;
+  --info-soft: #eaf2fd;
+  --info-ink: #1c5cab;
+
+  /* Chart ink */
+  --chart-series-1: #2a78d6;
+  --chart-remainder: #d8dde5;
+  --chart-grid: #eceff3;
+  --chart-axis: #cfd5de;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-full: 999px;
+
+  --shadow-xs: 0 1px 2px rgba(16, 19, 26, 0.05);
+  --shadow-sm: 0 1px 3px rgba(16, 19, 26, 0.07), 0 1px 2px rgba(16, 19, 26, 0.04);
+  --shadow: 0 4px 12px rgba(16, 19, 26, 0.07), 0 1px 3px rgba(16, 19, 26, 0.05);
+  --shadow-lg: 0 12px 32px rgba(16, 19, 26, 0.1), 0 2px 8px rgba(16, 19, 26, 0.05);
+  --shadow-primary: 0 6px 18px rgba(42, 120, 214, 0.24);
+
+  /* Inter via next/font (see app/layout.tsx), with the old system stack kept as the
+     fallback so a failed font load degrades to what shipped before rather than to
+     Times New Roman. */
+  --font-sans: var(--font-inter), system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Dark values are declared under both scopes: the media query follows the OS,
+   the data-theme scope follows the in-app toggle and must win either way. */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+
+    --background: #0d0f13;
+    --surface: #15181e;
+    --surface-2: #1b1f27;
+    --surface-3: #232833;
+    --card: #15181e;
+    --card-foreground: #f0f2f5;
+
+    --foreground: #f0f2f5;
+    --foreground-secondary: #b6bcc8;
+    --muted: #1b1f27;
+    --muted-foreground: #8d95a3;
+    --faint: #6b7383;
+
+    --primary: #3987e5;
+    --primary-hover: #5598e7;
+    --primary-soft: #16283f;
+    --primary-foreground: #ffffff;
+
+    --border: #262b35;
+    --border-strong: #333a47;
+    --ring: rgba(57, 135, 229, 0.45);
+
+    --success: #0ca30c;
+    --success-soft: #10240f;
+    --success-ink: #4ec44e;
+    --warning: #fab219;
+    --warning-soft: #2a2008;
+    --warning-ink: #f0b83c;
+    --error: #d03b3b;
+    --error-soft: #2d1414;
+    --error-ink: #ea6b6b;
+    --info: #3987e5;
+    --info-soft: #16283f;
+    --info-ink: #6da7ec;
+
+    --chart-series-1: #3987e5;
+    --chart-remainder: #2d333e;
+    --chart-grid: #21262f;
+    --chart-axis: #333a47;
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45);
+    --shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
+    --shadow-primary: 0 6px 18px rgba(57, 135, 229, 0.3);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --background: #0d0f13;
+  --surface: #15181e;
+  --surface-2: #1b1f27;
+  --surface-3: #232833;
+  --card: #15181e;
+  --card-foreground: #f0f2f5;
+
+  --foreground: #f0f2f5;
+  --foreground-secondary: #b6bcc8;
+  --muted: #1b1f27;
+  --muted-foreground: #8d95a3;
+  --faint: #6b7383;
+
+  --primary: #3987e5;
+  --primary-hover: #5598e7;
+  --primary-soft: #16283f;
+  --primary-foreground: #ffffff;
+
+  --border: #262b35;
+  --border-strong: #333a47;
+  --ring: rgba(57, 135, 229, 0.45);
+
+  --success: #0ca30c;
+  --success-soft: #10240f;
+  --success-ink: #4ec44e;
+  --warning: #fab219;
+  --warning-soft: #2a2008;
+  --warning-ink: #f0b83c;
+  --error: #d03b3b;
+  --error-soft: #2d1414;
+  --error-ink: #ea6b6b;
+  --info: #3987e5;
+  --info-soft: #16283f;
+  --info-ink: #6da7ec;
+
+  --chart-series-1: #3987e5;
+  --chart-remainder: #2d333e;
+  --chart-grid: #21262f;
+  --chart-axis: #333a47;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45);
+  --shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
+  --shadow-primary: 0 6px 18px rgba(57, 135, 229, 0.3);
+}
+
+/* ========================================================================== */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html {
+    background-color: var(--background);
+    color: var(--foreground);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Inter ships a straight-sided 'a' and a disambiguated '1' behind these two
+       features, which is the difference between it reading as a generic webfont and
+       reading like the product interfaces it is meant to sit alongside. */
+    font-feature-settings: 'cv11', 'ss01';
+    font-optical-sizing: auto;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    /* Mono faces run large next to Inter at the same nominal size. */
+    font-size: 0.9em;
+  }
+
+  /* Figures in a policy answer line up in a column when they share a width, which
+     matters here: half this app's content is leave days and rupee amounts. */
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+
+  a {
+    color: var(--primary);
+    text-decoration: none;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+    background: none;
+    border: none;
+  }
+
+  /* Visible focus for keyboard users, suppressed for mouse clicks. */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  ::selection {
+    background: var(--primary-soft);
+    color: var(--foreground);
+  }
+}
+
+/* Scrollbars ---------------------------------------------------------------- */
+
+.scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.scroll-slim::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.scroll-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-slim::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-slim::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
+}
+
+/* Primitives --------------------------------------------------------------- */
+
+.card {
+  background-color: var(--card);
+  color: var(--card-foreground);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 0.875rem;
+  transition: background-color 0.16s ease, border-color 0.16s ease,
+    transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+  white-space: nowrap;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: var(--shadow-xs);
+}
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--primary-hover);
+  box-shadow: var(--shadow-primary);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-secondary {
+  background-color: var(--surface);
+  color: var(--foreground);
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--surface-2);
+  border-color: var(--faint);
+}
+.btn-ghost {
+  background-color: transparent;
+  color: var(--foreground-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--surface-2);
+  color: var(--foreground);
+}
+.btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.input {
+  display: block;
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background-color: var(--surface);
+  color: var(--foreground);
+  font-size: 0.9375rem;
+  transition: border-color 0.16s, box-shadow 0.16s;
+}
+.input::placeholder {
+  color: var(--faint);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  padding: 0.1875rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.badge-success {
+  background-color: var(--success-soft);
+  color: var(--success-ink);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+.badge-warning {
+  background-color: var(--warning-soft);
+  color: var(--warning-ink);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.badge-error {
+  background-color: var(--error-soft);
+  color: var(--error-ink);
+  border-color: color-mix(in srgb, var(--error) 30%, transparent);
+}
+.badge-info {
+  background-color: var(--info-soft);
+  color: var(--info-ink);
+  border-color: color-mix(in srgb, var(--info) 28%, transparent);
+}
+.badge-neutral {
+  background-color: var(--surface-2);
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 0.75rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong);
+  background-color: var(--surface);
+  color: var(--foreground-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition: all 0.16s ease;
+}
+.chip:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background-color: var(--primary-soft);
+}
+
+.label-caps {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.divider {
+  height: 1px;
+  background-color: var(--border);
+  border: 0;
+}
+
+/* Rich text (bot answers) -------------------------------------------------- */
+
+.rich p {
+  margin: 0 0 0.625rem;
+}
+.rich p:last-child {
+  margin-bottom: 0;
+}
+.rich strong {
+  font-weight: 650;
+  color: var(--foreground);
+}
+.rich ul {
+  margin: 0 0 0.625rem;
+  padding-left: 1.125rem;
+  list-style: none;
+}
+.rich li {
+  position: relative;
+  margin-bottom: 0.3125rem;
+}
+.rich li::before {
+  content: '';
+  position: absolute;
+  left: -0.875rem;
+  top: 0.5rem;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--primary);
+  opacity: 0.7;
+}
+.rich ol {
+  margin: 0 0 0.625rem;
+  padding-left: 1.25rem;
+}
+.rich ol li {
+  margin-bottom: 0.3125rem;
+}
+.rich table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0 0.75rem;
+  font-size: 0.875rem;
+}
+.rich th,
+.rich td {
+  text-align: left;
+  padding: 0.4375rem 0.625rem;
+  border-bottom: 1px solid var(--border);
+}
+.rich th {
+  font-weight: 650;
+  color: var(--foreground-secondary);
+  background-color: var(--surface-2);
+  font-size: 0.8125rem;
+}
+.rich-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Animations -------------------------------------------------------------- */
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+@keyframes growBar {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes pulseRing {
+  0% { box-shadow: 0 0 0 0 rgba(12, 163, 12, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(12, 163, 12, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(12, 163, 12, 0); }
+}
+
+.anim-in { animation: slideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-fade { animation: fadeIn 0.3s ease both; }
+.anim-scale { animation: scaleIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/*
+ * One rotating greeting swapping for the next. Rises as it fades in rather than
+ * cross-dissolving in place: a pure opacity change on text reads as a flicker at
+ * this size, where a few pixels of travel reads as one line replacing another.
+ */
+.anim-rotate-in {
+  display: inline-block;
+  animation: rotateIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes rotateIn {
+  from {
+    opacity: 0;
+    transform: translateY(0.4em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--surface-3) 50%,
+    var(--surface-2) 75%
+  );
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--radius-sm);
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--success);
+  animation: pulseRing 2.4s ease-out infinite;
+  flex-shrink: 0;
+}
+
+/* Respect a reduced-motion preference — decoration only, never content. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Layout helpers ---------------------------------------------------------- */
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background-color: var(--background);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Mobile: the chat sidebar becomes an overlay drawer rather than a column. */
+@media (max-width: 860px) {
+  .sidebar-drawer {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 60;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.45);
+    animation: fadeIn 0.2s ease both;
+  }
+  .hide-mobile {
+    display: none !important;
+  }
+}
+
+@media (min-width: 861px) {
+  .only-mobile {
+    display: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Streaming answers
+   --------------------------------------------------------------------------- */
+
+/*
+ * The caret that trails text as the model writes it. Inline-block rather than a
+ * pseudo-element on the text so it sits after the last character regardless of
+ * where the line wraps.
+ */
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--primary);
+  animation: caretBlink 1s steps(2, start) infinite;
+}
+
+/*
+ * The same caret, but trailing the last character of rendered markdown.
+ *
+ * A plain sibling element cannot do this: the answer renders as block-level <p>
+ * and <ul>, so a span placed after them wraps to its own line below the text. A
+ * ::after on the last block sits inline where the sentence actually ends.
+ *
+ * Lists need the caret on their last <li>, not after the list — hence the second
+ * selector, and hence excluding ul/ol from the first so only one caret renders.
+ */
+.typing-caret-host .rich > :last-child:not(ul):not(ol):not(.rich-table-wrap)::after,
+.typing-caret-host .rich > :is(ul, ol):last-child > li:last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--primary);
+  animation: caretBlink 1s steps(2, start) infinite;
+}
+
+@keyframes caretBlink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Refinements
+   --------------------------------------------------------------------------- */
+
+/*
+ * Focus rings were a flat outline on every element. A ring plus a soft halo
+ * reads clearly on both the light surfaces and the dark ones, where a 2px line
+ * against a dark border was hard to see.
+ */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+/* Interactive surfaces lift slightly, and settle when pressed. */
+.card {
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.btn {
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    color 0.14s ease,
+    transform 0.1s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/*
+ * Figures — leave balances, amounts, ticket ids — line up in columns when the
+ * digits are tabular. Without this a table of amounts visibly wobbles.
+ */
+.tabular,
+td:has(> .tabular),
+.stat-value {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/*
+ * Skeletons: a single sweeping highlight rather than a pulsing block, so several
+ * of them stacked read as one loading surface instead of flashing out of sync.
+ */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--foreground) 6%, transparent),
+    transparent
+  );
+  animation: skeletonSweep 1.4s ease-in-out infinite;
+}
+
+@keyframes skeletonSweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/*
+ * Respect the OS setting. Someone who turns animation off usually means it —
+ * vestibular disorders, or simply a slow machine — so every decorative motion
+ * here stops, while the caret keeps blinking because it conveys state.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .stream-caret {
+    animation: none;
+    opacity: 1;
+  }
+
+  .typing-caret-host .rich > :last-child::after,
+  .typing-caret-host .rich > :is(ul, ol):last-child > li:last-child::after {
+    animation: none;
+    opacity: 1;
+  }
+
+  .skeleton::after {
+    display: none;
+  }
+}
