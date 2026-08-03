@@ -26,6 +26,9 @@ import org.springframework.data.mongodb.core.mapping.Document;
  *     orphaned line
  * @param confidential set for sensitive matters; the dashboard withholds the
  *     employee's identity when it is true
+ * @param comments the thread between HR and the employee, oldest first. Null on
+ *     documents written before threads existed, so every reader goes through {@link
+ *     #thread()} rather than dereferencing it.
  */
 @Document(collection = "tickets")
 public record Ticket(
@@ -43,11 +46,28 @@ public record Ticket(
     double confidence,
     List<TranscriptTurn> transcript,
     boolean confidential,
-    String channel) {
+    String channel,
+    List<TicketComment> comments) {
+
+  /** Never null, so callers and templates do not each need their own guard. */
+  public List<TicketComment> thread() {
+    return comments == null ? List.of() : comments;
+  }
 
   public Ticket withStatus(String next) {
     return new Ticket(
         id, query, reason, raisedBy, raisedByName, createdAt, next, priority, route, assignee,
-        tags, confidence, transcript, confidential, channel);
+        tags, confidence, transcript, confidential, channel, comments);
+  }
+
+  public Ticket withComments(List<TicketComment> next) {
+    return new Ticket(
+        id, query, reason, raisedBy, raisedByName, createdAt, status, priority, route, assignee,
+        tags, confidence, transcript, confidential, channel, next);
+  }
+
+  /** Whether this address raised the ticket. Case-insensitive; false for a null. */
+  public boolean isOwnedBy(String email) {
+    return email != null && raisedBy != null && raisedBy.equalsIgnoreCase(email);
   }
 }

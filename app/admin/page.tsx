@@ -18,6 +18,7 @@ import {
   type UploadOutcome,
 } from '@/lib/knowledge/api';
 import type { KnowledgeDoc } from '@/lib/knowledge/types';
+import { postTicketComment } from '@/lib/hr-api';
 import {
   ROUTE_LABELS,
   buildWeeklyDigest,
@@ -27,6 +28,7 @@ import {
   subscribe,
   updateTicketStatus,
   type Ticket,
+  type TicketComment,
   type TicketStatus,
 } from '@/lib/hr-store';
 import { useChatbotAuth } from '@/lib/chatbot-auth';
@@ -670,7 +672,106 @@ function TicketRow({ ticket }: { ticket: Ticket }) {
           </span>
         )}
       </div>
+
+      <ReplyThread ticket={ticket} />
     </article>
+  );
+}
+
+/**
+ * The conversation with the employee, and the box to add to it.
+ *
+ * <p>Worth saying plainly in the UI that this reaches them: HR writing here is
+ * writing to the person, on a page that person reads. Treating it as an internal
+ * triage note would be a bad surprise for whoever assumed nobody was looking.
+ */
+function ReplyThread({ ticket }: { ticket: Ticket }) {
+  const [thread, setThread] = useState<TicketComment[]>(ticket.comments ?? []);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await postTicketComment(ticket.id, text);
+      setThread(updated.comments ?? []);
+      setDraft('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not post that reply.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: '0.875rem', borderTop: '1px solid var(--border)', paddingTop: '0.875rem' }}>
+      <p className="label-caps" style={{ marginBottom: '0.625rem' }}>
+        {thread.length === 0 ? 'Reply to the employee' : `Thread · ${thread.length}`}
+      </p>
+
+      {thread.length > 0 && (
+        <div style={{ display: 'grid', gap: '0.5rem', marginBottom: '0.75rem' }}>
+          {thread.map((c) => {
+            const fromHr = c.authorRole === 'hr';
+            return (
+              <div
+                key={c.id}
+                style={{
+                  padding: '0.625rem 0.75rem',
+                  borderRadius: 8,
+                  background: fromHr ? 'var(--primary-soft)' : 'var(--surface-2)',
+                  borderLeft: `3px solid ${fromHr ? 'var(--primary)' : 'var(--border-strong)'}`,
+                }}
+              >
+                <p
+                  style={{
+                    fontSize: '0.6875rem',
+                    fontWeight: 700,
+                    color: fromHr ? 'var(--primary)' : 'var(--muted-foreground)',
+                    marginBottom: '0.1875rem',
+                  }}
+                >
+                  {fromHr ? `${c.authorName || 'HR'} · HR` : `${c.authorName || 'Employee'} · employee`}
+                </p>
+                <div style={{ fontSize: '0.8125rem', lineHeight: 1.55 }}>
+                  <RichText text={c.body} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <textarea
+        className="input"
+        style={{ minHeight: 64, resize: 'vertical', fontSize: '0.8125rem' }}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="The employee sees this on their own tickets page. Supports **bold** and lists."
+      />
+
+      <div
+        style={{
+          display: 'flex',
+          gap: '0.75rem',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          marginTop: '0.5rem',
+        }}
+      >
+        <button className="btn btn-primary btn-sm" onClick={send} disabled={busy || !draft.trim()}>
+          {busy ? 'Sending…' : 'Send to employee'}
+        </button>
+        <span style={{ fontSize: '0.75rem', color: 'var(--faint)' }}>
+          Visible to the employee who raised this
+        </span>
+        {error && <span style={{ fontSize: '0.75rem', color: 'var(--error-ink)' }}>{error}</span>}
+      </div>
+    </div>
   );
 }
 

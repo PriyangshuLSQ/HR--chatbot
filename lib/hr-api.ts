@@ -136,3 +136,31 @@ export async function putThreads(threads: StoredThread[]): Promise<void> {
     })
   );
 }
+
+/**
+ * One ticket, with its thread.
+ *
+ * The server answers 404 rather than 403 for a ticket that is not yours — it will
+ * not confirm an id exists to someone who cannot read it — so a failure here means
+ * "not yours or not there", and the caller should not try to distinguish.
+ */
+export async function fetchTicket(id: string): Promise<Ticket> {
+  return json<Ticket>(await fetch(`/api/tickets/${encodeURIComponent(id)}`, { cache: 'no-store' }));
+}
+
+/**
+ * Adds a message to a ticket's thread.
+ *
+ * Who it is attributed to is not sent: the server stamps the author and the side
+ * (`hr` or `employee`) from the session. A client that could name its own side could
+ * put words in HR's mouth on a document the employee then reads as official.
+ */
+export async function postTicketComment(id: string, body: string): Promise<Ticket> {
+  return json<Ticket>(
+    await fetch(`/api/tickets/${encodeURIComponent(id)}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    })
+  );
+}

@@ -11,7 +11,12 @@ import { isSoundOn, playNotification, setSoundOn } from '@/lib/sound';
 import { PoweredByLeadSquared, ROBIN_NAME, RobinAvatar } from '@/components/Robin';
 import type { Citation, KnowledgeAnswer } from '@/lib/knowledge/types';
 import RichText from '@/components/RichText';
-import { RotatingText, TypedRichText, trimDanglingMarkup } from '@/components/Typewriter';
+import {
+  RotatingText,
+  TypedRichText,
+  hideDanglingMarkup,
+  useSmoothedStream,
+} from '@/components/Typewriter';
 import FeedbackBar from '@/components/FeedbackBar';
 import {
   LeaveBalanceCard,
@@ -34,6 +39,7 @@ import {
   SpeakerIcon,
   SpeakerOffIcon,
   SunIcon,
+  TicketIcon,
   WalletIcon,
   XIcon,
 } from '@/components/Icons';
@@ -90,6 +96,9 @@ const GREETING_LINES = [
   'Chasing an expense claim or an asset request?',
   'Ask about insurance, notice periods or WFH.',
 ];
+
+/** Within this many px of the bottom counts as "still following the conversation". */
+const FOLLOW_THRESHOLD_PX = 120;
 
 const WELCOME = `Hello! I'm **Robin**, the LeadSquared HR assistant, available 24/7.
 
@@ -185,12 +194,22 @@ async function askKnowledge(
 
       for (const frame of frames) {
         const event = /^event:\s*(.+)$/m.exec(frame)?.[1]?.trim();
-        // A fragment containing newlines arrives as several `data:` lines; SSE
-        // rejoins them with \n, and dropping that would run words together.
+        /*
+         * A fragment containing newlines arrives as several `data:` lines; SSE
+         * rejoins them with \n, and dropping that would run words together.
+         *
+         * Everything after `data:` is content, including a leading space. The SSE
+         * spec has clients strip one optional padding space, and doing that here
+         * ate the spaces off the front of tokens — the model emits " sick", the
+         * server writes `data: sick`, and stripping turned the answer into
+         * "advance;sickleavecanbeapplied...". Verified against spring-webmvc 6.1.6:
+         * the field prefix is the literal `data:` with no padding, so the first
+         * character after it always belongs to the token.
+         */
         const data = frame
           .split('\n')
           .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).replace(/^ /, ''))
+          .map((line) => line.slice(5))
           .join('\n');
 
         if (event === 'token') onToken(data);
@@ -215,8 +234,21 @@ export default function ChatPage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
-  /** Text arriving from the model right now, before the turn is finalised. */
-  const [streaming, setStreaming] = useState('');
+  /**
+   * Text arriving from the model right now, before the turn is finalised.
+   *
+   * <p>Paced rather than rendered as it arrives. The model delivers a long pause and
+   * then a burst — measured here at 447 characters in under two seconds, the first
+   * 90 of them in one lump because the server withholds that much to rule out a
+   * refusal. Shown directly that reads as a paragraph appearing at once, which is
+   * the opposite of the effect streaming is for.
+   */
+  const {
+    text: streamText,
+    push: pushToken,
+    drained: drainStream,
+    reset: resetStream,
+  } = useSmoothedStream();
   /**
    * The one message allowed to type itself out.
    *
@@ -256,6 +288,8 @@ export default function ChatPage() {
    */
   const streamedRef = useRef(false);
   const endRef = useRef<HTMLDivElement>(null);
+  /** The scrolling transcript, so follow-along can tell whether to yield. */
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Threads are stored per employee. Falls back to the demo identity only when
@@ -338,13 +372,37 @@ export default function ChatPage() {
    * appended — without that the text would type itself off the bottom of a
    * transcript that had stopped following it.
    */
-  const scrollToEnd = useCallback(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  const scrollToEnd = useCallback((smooth = true) => {
+    endRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
   }, []);
 
+  /**
+   * The follow-along scroll, used while text is being revealed.
+   *
+   * <p>Instant, not smooth, and that is the whole point. A smooth scroll is an
+   * animation with a duration; asking for one on every frame of a reveal restarts it
+   * before it can finish, so the transcript judders instead of tracking the text. An
+   * instant scroll each frame is what reads as smooth.
+   *
+   * <p>It also yields to the reader: someone who has scrolled up to re-read an
+   * earlier answer is not dragged back down mid-sentence.
+   */
+  const followText = useCallback(() => {
+    const el = scrollerRef.current;
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight > FOLLOW_THRESHOLD_PX) return;
+    scrollToEnd(false);
+  }, [scrollToEnd]);
+
+  // A new turn, or the waiting state changing: animate, because this is a discrete
+  // jump rather than a continuous one.
   useEffect(() => {
-    scrollToEnd();
-  }, [messages.length, thinking, streaming, scrollToEnd]);
+    scrollToEnd(true);
+  }, [messages.length, thinking, scrollToEnd]);
+
+  // Text arriving: track it per frame.
+  useEffect(() => {
+    if (streamText) followText();
+  }, [streamText, followText]);
 
   function freshThread(): Thread {
     return {
@@ -439,11 +497,16 @@ export default function ChatPage() {
           // this text is discarded and the employee is offered a human instead.
           onToken: (text) => {
             streamedRef.current = true;
-            setStreaming((prev) => prev + text);
+            pushToken(text);
           },
         });
         ctxRef.current = ctx;
-        setStreaming('');
+
+        // Let the tail finish revealing before the finished message replaces this
+        // one. Swapping in the complete text mid-reveal is the dump the pacing
+        // exists to avoid — and it is the last place it could still happen.
+        await drainStream();
+        resetStream();
 
         const botMsg: ChatMessage = {
           id: newId('msg'),
@@ -499,10 +562,21 @@ export default function ChatPage() {
         playNotification();
       } finally {
         setThinking(false);
-        setStreaming('');
+        resetStream();
       }
     },
-    [activeId, channel.label, faqs, messages, thinking, email, userName]
+    [
+      activeId,
+      channel.label,
+      faqs,
+      messages,
+      thinking,
+      email,
+      userName,
+      pushToken,
+      drainStream,
+      resetStream,
+    ]
   );
 
   const showIntro = messages.length <= 1;
@@ -538,6 +612,7 @@ export default function ChatPage() {
         />
 
         <div
+          ref={scrollerRef}
           className="scroll-slim"
           style={{
             flex: 1,
@@ -558,7 +633,7 @@ export default function ChatPage() {
                   channel={channel.label}
                   onPick={send}
                   animate={m.id === animateId}
-                  onTick={scrollToEnd}
+                  onTick={followText}
                 />
               )
             )}
@@ -568,7 +643,8 @@ export default function ChatPage() {
               and grows in place. The dots stay for retrieval and embedding, which
               is genuine waiting with nothing to show yet.
             */}
-            {thinking && (streaming ? <StreamingBubble text={streaming} /> : <Thinking />)}
+            {thinking &&
+              (streamText ? <StreamingBubble text={streamText} /> : <Thinking />)}
             <div ref={endRef} />
           </div>
         </div>
@@ -944,6 +1020,16 @@ function Header({
         {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
       </button>
 
+      {/*
+        Shown to everyone, unlike the admin link that used to sit here: every
+        employee has tickets of their own to read, and the page shows only theirs.
+      */}
+      <a href="/tickets" className="btn btn-secondary btn-sm" title="My HR tickets">
+        <TicketIcon size={15} />
+        <span className="hide-mobile">My tickets</span>
+        <span className="sr-only only-mobile">My HR tickets</span>
+      </a>
+
     </header>
   );
 }
@@ -1244,20 +1330,12 @@ function Citations({
  * The formatted version replaces this the moment the turn completes.
  */
 /** The three bouncing dots, on their own so both waiting states share one. */
-function BouncingDots() {
+/** An equaliser, for the phase where nothing can be shown yet. */
+function WaveBars() {
   return (
-    <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: 'var(--muted-foreground)',
-            animation: `typingBounce 1.3s ${i * 0.16}s infinite ease-in-out`,
-          }}
-        />
+    <span className="wave-bars" aria-hidden>
+      {[0, 1, 2, 3, 4].map((i) => (
+        <span key={i} className="wave-bar" style={{ animationDelay: `${i * 0.11}s` }} />
       ))}
     </span>
   );
@@ -1266,26 +1344,41 @@ function BouncingDots() {
 /**
  * What Robin is doing right now, above the bubble.
  *
- * <p>Two words, and the distinction is real rather than decorative: <b>thinking</b>
- * is retrieval and embedding, where there is genuinely nothing to show yet, and
- * <b>typing</b> is the model emitting tokens. Someone watching a slow answer can
- * tell a stalled search from a long reply.
+ * <p>The two phases are genuinely different and are shown differently. While
+ * retrieval, embedding and prompt evaluation run — measured at eight of the eleven
+ * seconds a real answer took here — there is nothing to say, so nothing is said: a
+ * moving level stands in for work happening. Once words are arriving there is
+ * something to name, so it is named, once, in one word.
+ *
+ * <p>No wording for the waiting phase on purpose. A sentence describing internals
+ * ("reading your HR documents") is a claim about what the machine is doing, sitting
+ * on screen for nine seconds, competing with the answer for attention — and it has
+ * to be re-read every time to learn nothing new.
  */
-function ActivityLabel({ state }: { state: 'thinking' | 'typing' }) {
+function ActivityLabel({ state }: { state: 'waiting' | 'writing' }) {
+  if (state === 'waiting') return <WaveBars />;
+
   return (
     <span
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: '0.4375rem',
         fontSize: '0.75rem',
         fontWeight: 600,
-        color: 'var(--muted-foreground)',
+        letterSpacing: '0.01em',
       }}
       role="status"
     >
-      Robin is {state}
-      <BouncingDots />
+      <span className="activity-shimmer">Writing</span>
+    </span>
+  );
+}
+
+/** The avatar with a halo leaving it, used while a turn is in flight. */
+function ActiveAvatar() {
+  return (
+    <span className="activity-halo">
+      <RobinAvatar size={30} rounded="badge" ring />
     </span>
   );
 }
@@ -1293,9 +1386,9 @@ function ActivityLabel({ state }: { state: 'thinking' | 'typing' }) {
 function StreamingBubble({ text }: { text: string }) {
   return (
     <div style={{ display: 'flex', gap: '0.625rem', alignItems: 'flex-start' }}>
-      <RobinAvatar size={30} rounded="badge" ring />
+      <ActiveAvatar />
       <div style={{ display: 'grid', gap: '0.375rem', minWidth: 0 }}>
-        <ActivityLabel state="typing" />
+        <ActivityLabel state="writing" />
         <div
           style={{
             padding: '0.875rem 1rem',
@@ -1322,7 +1415,7 @@ function StreamingBubble({ text }: { text: string }) {
             trails the final character instead of dropping to its own line.
           */}
           <div className="typing-caret-host">
-            <RichText text={trimDanglingMarkup(text)} />
+            <RichText text={hideDanglingMarkup(text)} />
           </div>
         </div>
       </div>
@@ -1332,18 +1425,9 @@ function StreamingBubble({ text }: { text: string }) {
 
 function Thinking() {
   return (
-    <div style={{ display: 'flex', gap: '0.625rem', alignItems: 'flex-start' }}>
-      <RobinAvatar size={30} rounded="badge" ring />
-      <div
-        style={{
-          padding: '0.75rem 1rem',
-          borderRadius: '4px 14px 14px 14px',
-          background: 'var(--surface)',
-          border: '1px solid var(--border)',
-        }}
-      >
-        <ActivityLabel state="thinking" />
-      </div>
+    <div style={{ display: 'flex', gap: '0.625rem', alignItems: 'center', padding: '0.25rem 0' }}>
+      <ActiveAvatar />
+      <ActivityLabel state="waiting" />
     </div>
   );
 }

@@ -2,6 +2,7 @@ package com.leadsquared.hr.knowledge.migration;
 
 import com.leadsquared.hr.knowledge.model.Feedback;
 import com.leadsquared.hr.knowledge.model.Ticket;
+import com.leadsquared.hr.knowledge.model.TicketComment;
 import com.leadsquared.hr.knowledge.store.FeedbackRepository;
 import com.leadsquared.hr.knowledge.store.TicketRepository;
 import java.time.Instant;
@@ -81,10 +82,11 @@ public class DemoDataSeed implements ApplicationRunner {
             "hr_head",
             "Priya Nair (HR Head)",
             List.of("sensitive", "posh", "urgent", "confidential"),
-            1,
+            1.0,
             List.of(),
             true,
-            "Microsoft Teams"),
+            "Microsoft Teams",
+            List.of()),
         new Ticket(
             "HR-9B71D",
             "My relocation allowance was not included in the last payroll",
@@ -100,7 +102,8 @@ public class DemoDataSeed implements ApplicationRunner {
             0.18,
             List.of(),
             false,
-            "HR Portal"),
+            "HR Portal",
+            List.of()),
         new Ticket(
             "HR-7A33C",
             "Can I convert my notice period buyout into leave encashment?",
@@ -116,7 +119,8 @@ public class DemoDataSeed implements ApplicationRunner {
             0.34,
             List.of(),
             false,
-            "HR Portal"));
+            "HR Portal",
+            List.of()));
   }
 
   private static List<Feedback> seedFeedback() {

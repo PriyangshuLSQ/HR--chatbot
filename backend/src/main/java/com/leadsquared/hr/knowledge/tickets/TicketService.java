@@ -1,6 +1,7 @@
 package com.leadsquared.hr.knowledge.tickets;
 
 import com.leadsquared.hr.knowledge.model.Ticket;
+import com.leadsquared.hr.knowledge.model.TicketComment;
 import com.leadsquared.hr.knowledge.model.TranscriptTurn;
 import com.leadsquared.hr.knowledge.store.TicketRepository;
 import java.time.Instant;
@@ -16,6 +17,9 @@ public class TicketService {
 
   /** Enough context for HR to understand the ask; not the employee's whole day. */
   private static final int TRANSCRIPT_TURNS = 6;
+
+  /** Long enough for a real reply, short enough that the thread stays readable. */
+  private static final int MAX_COMMENT_CHARS = 4000;
 
   private final TicketRepository tickets;
 
@@ -91,9 +95,60 @@ public class TicketService {
             input.confidence(),
             transcript,
             routing.confidential(),
-            input.channel() == null ? "HR Portal" : input.channel());
+            input.channel() == null ? "HR Portal" : input.channel(),
+            List.of());
 
     return tickets.save(ticket);
+  }
+
+  /**
+   * Appends a message to a ticket's thread.
+   *
+   * <p>Authorization is the caller's job — see {@code TicketController}, which is
+   * where the identity lives. This validates the content and stamps the record.
+   *
+   * @param authorRole {@link TicketComment#HR} or {@link TicketComment#EMPLOYEE}
+   * @return the updated ticket, or empty if there is no such id
+   * @throws IllegalArgumentException on an empty comment or an unknown role
+   */
+  public Optional<Ticket> addComment(
+      String id, String body, String author, String authorName, String authorRole) {
+
+    String text = body == null ? "" : body.trim();
+    if (text.isBlank()) {
+      throw new IllegalArgumentException("A comment needs something in it.");
+    }
+    if (text.length() > MAX_COMMENT_CHARS) {
+      throw new IllegalArgumentException(
+          "That comment is too long — keep it under " + MAX_COMMENT_CHARS + " characters.");
+    }
+    if (!TicketComment.HR.equals(authorRole) && !TicketComment.EMPLOYEE.equals(authorRole)) {
+      throw new IllegalArgumentException("A comment is from hr or from the employee.");
+    }
+
+    return tickets
+        .findById(id)
+        .map(
+            ticket -> {
+              // A confidential ticket withholds the employee's name everywhere, not
+              // just on the ticket header. HR's own name is always shown — the
+              // employee needs to know who is handling their matter.
+              String shownName =
+                  ticket.confidential() && TicketComment.EMPLOYEE.equals(authorRole)
+                      ? "Withheld (confidential)"
+                      : authorName;
+
+              List<TicketComment> thread = new ArrayList<>(ticket.thread());
+              thread.add(
+                  new TicketComment(
+                      newCommentId(), text, author, shownName, authorRole, Instant.now().toString()));
+
+              return tickets.save(ticket.withComments(thread));
+            });
+  }
+
+  private static String newCommentId() {
+    return "c_" + Long.toString(System.nanoTime(), 36);
   }
 
   /**

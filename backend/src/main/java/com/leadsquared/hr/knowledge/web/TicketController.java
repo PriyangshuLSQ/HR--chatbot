@@ -1,6 +1,7 @@
 package com.leadsquared.hr.knowledge.web;
 
 import com.leadsquared.hr.knowledge.model.Ticket;
+import com.leadsquared.hr.knowledge.model.TicketComment;
 import com.leadsquared.hr.knowledge.security.CurrentUser;
 import com.leadsquared.hr.knowledge.security.SignedInUser;
 import com.leadsquared.hr.knowledge.tickets.TicketService;
@@ -96,18 +97,106 @@ public class TicketController {
     return ResponseEntity.status(HttpStatus.CREATED).body(tickets.create(attributed));
   }
 
+  /**
+   * One ticket, for the employee's own thread view or the admin console.
+   *
+   * <p>404 rather than 403 when someone asks for a ticket that is not theirs. A 403
+   * would confirm the id exists, and ticket ids are short and sequential-ish — that
+   * is enough to enumerate which colleagues have raised confidential matters, which
+   * is exactly what confidentiality here is protecting.
+   */
+  @GetMapping("/{id}")
+  public ResponseEntity<?> one(@PathVariable String id) {
+    return tickets
+        .find(id)
+        .filter(this::mayRead)
+        .<ResponseEntity<?>>map(ResponseEntity::ok)
+        .orElseGet(() -> notFound());
+  }
+
+  public record NewComment(String body) {}
+
+  /**
+   * Adds a message to the thread.
+   *
+   * <p>HR may comment on anything; an employee only on their own ticket, and their
+   * message is stamped as theirs regardless of what the request says. Both
+   * directions are open on purpose — a thread where only one side can write is not a
+   * conversation, and HR asking "which month was this?" needs somewhere for the
+   * answer to go.
+   */
+  @PostMapping("/{id}/comments")
+  public ResponseEntity<?> comment(
+      @PathVariable String id, @RequestBody(required = false) NewComment body) {
+
+    if (body == null) return ApiErrors.badRequest("Expected a JSON body.");
+
+    SignedInUser user = currentUser.get().orElse(null);
+    Ticket ticket = tickets.find(id).orElse(null);
+
+    // Same reasoning as above: an unreadable ticket is reported as absent.
+    if (ticket == null || !mayRead(ticket)) return notFound();
+
+    boolean asHr = user == null || user.isAdmin();
+    String role = asHr ? TicketComment.HR : TicketComment.EMPLOYEE;
+
+    return tickets
+        .addComment(
+            id,
+            body.body(),
+            user == null ? "hr@leadsquared.com" : user.email(),
+            user == null ? "HR" : user.name(),
+            role)
+        .<ResponseEntity<?>>map(ResponseEntity::ok)
+        .orElseGet(() -> notFound());
+  }
+
   public record StatusChange(String status) {}
 
+  /**
+   * Re-statuses a ticket. HR only.
+   *
+   * <p>This used to take any id from any signed-in caller and apply it, so an
+   * employee could have resolved a colleague's escalation — or reopened their own
+   * after HR closed it — by guessing a ticket number. Closing an escalation is HR's
+   * judgement about whether the matter is handled, so it stays with HR.
+   */
   @PatchMapping("/{id}/status")
   public ResponseEntity<?> updateStatus(
       @PathVariable String id, @RequestBody StatusChange body) {
 
+    if (!isHr()) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN)
+          .body(Map.of("error", "Only HR can change a ticket's status."));
+    }
+
     return tickets
         .updateStatus(id, body.status())
         .<ResponseEntity<?>>map(ResponseEntity::ok)
-        .orElseGet(
-            () ->
-                ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(Map.of("error", "No such ticket.")));
+        .orElseGet(() -> notFound());
+  }
+
+  // -------------------------------------------------------------------------
+  // Access
+  // -------------------------------------------------------------------------
+
+  /**
+   * A null user means sign-in is not configured at all (the open filter chain), and
+   * this service then behaves as it did before Entra: everything is readable. That is
+   * the same allowance {@link #list()} makes, kept in one place.
+   */
+  private boolean isHr() {
+    SignedInUser user = currentUser.get().orElse(null);
+    return user == null || user.isAdmin();
+  }
+
+  private boolean mayRead(Ticket ticket) {
+    SignedInUser user = currentUser.get().orElse(null);
+    if (user == null || user.isAdmin()) return true;
+    return ticket.isOwnedBy(user.email());
+  }
+
+  private static ResponseEntity<?> notFound() {
+    return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "No such ticket."));
   }
 }

@@ -53,6 +53,22 @@ export interface Ticket {
   transcript: { role: 'user' | 'bot'; text: string }[];
   confidential: boolean;
   channel: string;
+  /**
+   * The thread between HR and the employee, oldest first. Optional because tickets
+   * written before threads existed have no field at all.
+   */
+  comments?: TicketComment[];
+}
+
+/** One message on a ticket thread. */
+export interface TicketComment {
+  id: string;
+  body: string;
+  author: string;
+  authorName: string;
+  /** Which side wrote it. Decided by the server from the session, never the client. */
+  authorRole: 'hr' | 'employee';
+  createdAt: string;
 }
 
 export type Rating = 'up' | 'down';

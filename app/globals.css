@@ -526,6 +526,108 @@
   0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
   30% { transform: translateY(-5px); opacity: 1; }
 }
+
+/* ---------------------------------------------------------------------------
+   Waiting on Robin
+   --------------------------------------------------------------------------- */
+
+/*
+ * A light sweeping across the label text.
+ *
+ * The gradient is clipped to the glyphs, so the animation is a highlight moving
+ * through the letters rather than anything moving on the page — which is why it
+ * reads as considered rather than busy, and why it can run for ten seconds without
+ * becoming irritating the way a bouncing element would.
+ */
+.activity-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 260% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerSweep 2.6s linear infinite;
+}
+
+@keyframes shimmerSweep {
+  from { background-position: 140% 0; }
+  to { background-position: -140% 0; }
+}
+
+/*
+ * A halo leaving the avatar, once per breath.
+ *
+ * On a pseudo-element so it cannot affect layout — the transform scales past the
+ * avatar's own box, and anything that pushed the bubble sideways while Robin
+ * thought would be worse than no indicator at all.
+ */
+.activity-halo {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+/*
+ * Sized deliberately: the avatar already carries a pale static ring, so a thin
+ * low-opacity halo just outside it was measured at 34% opacity and 1px — present in
+ * the computed style, invisible to the eye. It has to clear that ring in weight and
+ * in travel to register at all.
+ */
+.activity-halo::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 11px;
+  border: 2px solid var(--primary);
+  opacity: 0;
+  animation: haloPulse 1.9s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes haloPulse {
+  0% { transform: scale(0.86); opacity: 0.65; }
+  75% { transform: scale(1.45); opacity: 0; }
+  100% { transform: scale(1.45); opacity: 0; }
+}
+
+/*
+ * An equaliser for the phase with nothing to show yet.
+ *
+ * Five bars rather than three dots, because dots are what every chat window uses to
+ * mean "a person is typing" — and nobody is typing. Something is being searched and
+ * then composed, and a moving level reads as work happening rather than as a person
+ * pausing mid-sentence.
+ *
+ * Animated with scaleY rather than height so it stays on the compositor: this runs
+ * for the eight or nine seconds retrieval and prompt evaluation take, and a layout
+ * animation for that long is a long time to be recalculating the transcript.
+ */
+.wave-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 14px;
+}
+
+.wave-bar {
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  transform-origin: bottom center;
+  background: linear-gradient(180deg, #7c5cff 0%, var(--primary) 100%);
+  animation: waveRise 1.05s ease-in-out infinite;
+}
+
+@keyframes waveRise {
+  0%, 100% { transform: scaleY(0.26); opacity: 0.5; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
 @keyframes growBar {
   from { transform: scaleY(0); }
   to { transform: scaleY(1); }
@@ -790,6 +892,25 @@ td:has(> .tabular),
     opacity: 1;
   }
 
+  /* The shimmer is the label's colour, so it cannot simply be stopped — a halted
+     gradient would leave the text half-transparent. Put the ink back. */
+  .activity-shimmer {
+    animation: none;
+    background-image: none;
+    -webkit-text-fill-color: var(--muted-foreground);
+  }
+
+  .activity-halo::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .wave-bar {
+    animation: none;
+    opacity: 0.7;
+    transform: scaleY(0.5);
+  }
+
   .typing-caret-host .rich > :last-child::after,
   .typing-caret-host .rich > :is(ul, ol):last-child > li:last-child::after {
     animation: none;
@@ -798,5 +919,13 @@ td:has(> .tabular),
 
   .skeleton::after {
     display: none;
+  }
+}
+
+/* The ticket mailbox collapses to one column on a phone: a 240px list beside a
+   thread leaves neither enough room to read. */
+@media (max-width: 720px) {
+  .tickets-layout {
+    grid-template-columns: 1fr !important;
   }
 }
