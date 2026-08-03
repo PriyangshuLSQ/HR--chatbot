@@ -1,13 +1,25 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
-import { Inter, JetBrains_Mono } from 'next/font/google'
+import { Figtree, JetBrains_Mono } from 'next/font/google'
 import { ChatbotAuthProvider } from '@/lib/chatbot-auth'
 import './globals.css'
 
 /*
- * Inter, which is what the interfaces this is measured against use or approximate —
- * ChatGPT's Söhne and Claude's Styrene are both licensed, and Inter is the open
- * face designed for the same job: dense UI text on screen at small sizes.
+ * Figtree, chosen to read like Claude's interface.
+ *
+ * Claude sets Styrene (Commercial Type) and Tiempos (Klim); both are licensed and
+ * cannot ship here. Styrene is a geometric grotesque — wide, low contrast, generous
+ * x-height, terminals with a bit of personality — so the shortlist was the open faces
+ * with that character: Figtree, Plus Jakarta Sans, DM Sans, Manrope.
+ *
+ * Figtree won on how it behaves in THIS app rather than in a specimen. Rendered side
+ * by side at the sizes actually used here, Plus Jakarta Sans and Manrope both went
+ * cramped under the -0.02em tracking the headings carry ("answers in seconds" nearly
+ * collides), and DM Sans draws a hyphen long enough to read as an en-dash in
+ * "half-sentences". Figtree holds its spacing at display and body size both.
+ *
+ * It replaced Inter, which is excellent but deliberately neutral and close to
+ * Helvetica — right for a dense dashboard, and not what was asked for.
  *
  * Loaded through next/font rather than a stylesheet link, which matters for more
  * than tidiness. It self-hosts the files at build time, so there is no request to
@@ -16,10 +28,10 @@ import './globals.css'
  * It also injects a size-adjusted local fallback, which is what stops the layout
  * jumping when the webfont lands.
  */
-const inter = Inter({
+const sans = Figtree({
   subsets: ['latin'],
   display: 'swap',
-  variable: '--font-inter',
+  variable: '--font-ui',
 })
 
 /* For `code` spans — policy answers quote figures like `80C` and `Form 16`. */
@@ -66,7 +78,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body className="antialiased">
         <ChatbotAuthProvider>
           {children}

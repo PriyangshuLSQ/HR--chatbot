@@ -146,14 +146,44 @@ export function TypedRichText({
   text,
   animate,
   onTick,
+  onAnimated,
 }: {
   text: string;
   animate: boolean;
   /** Called as the reveal grows, so a transcript can keep itself scrolled. */
   onTick?: () => void;
+  /**
+   * Fired once, on mount, when this render is going to animate.
+   *
+   * <p>Exists so the caller can remember that it happened. Switching conversations
+   * unmounts the transcript, and a remounted typewriter starts its counter at zero —
+   * so an answer given ten minutes ago typed itself out again every time the thread
+   * was reopened. Whether a message has already been revealed outlives this
+   * component, so the caller has to hold it.
+   */
+  onAnimated?: () => void;
 }) {
   const hasTable = useMemo(() => /^\s*\|.+\|\s*$/m.test(text), [text]);
-  const { visible, done } = useTypewriter(text, animate && !hasTable);
+
+  /**
+   * Decided once, on mount, and then immune to the prop changing.
+   *
+   * <p>Not merely tidy — without the latch this reveal cut itself short. The caller
+   * marks the message as seen from the mount effect below, which flips {@code animate}
+   * false on the parent's very next render, and the parent re-renders immediately
+   * (the waiting state clears the moment the answer lands). The typewriter would
+   * read that as "no longer animating" and jump straight to the full text.
+   */
+  const latched = useRef(animate && !hasTable);
+  const { visible, done } = useTypewriter(text, latched.current);
+
+  // Mount only, deliberately: reported when the reveal begins rather than when it
+  // finishes, so a thread switched away from mid-animation still counts as seen.
+  // Finishing is not the interesting event — starting is.
+  useEffect(() => {
+    if (latched.current) onAnimated?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     onTick?.();

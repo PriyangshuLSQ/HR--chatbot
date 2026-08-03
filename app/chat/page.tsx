@@ -287,6 +287,16 @@ export default function ChatPage() {
    * update would not have landed by then.
    */
   const streamedRef = useRef(false);
+
+  /**
+   * Message ids whose reveal has already been shown.
+   *
+   * <p>A ref rather than state: recording one must not re-render, or adding an id
+   * during the child's mount effect would restart the very animation being recorded.
+   * It exists because switching conversations unmounts the transcript — without it, a
+   * remounted typewriter began again and every reopened thread replayed its answers.
+   */
+  const animatedRef = useRef<Set<string>>(new Set());
   const endRef = useRef<HTMLDivElement>(null);
   /** The scrolling transcript, so follow-along can tell whether to yield. */
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -632,8 +642,9 @@ export default function ChatPage() {
                   message={m}
                   channel={channel.label}
                   onPick={send}
-                  animate={m.id === animateId}
+                  animate={m.id === animateId && !animatedRef.current.has(m.id)}
                   onTick={followText}
+                  onAnimated={() => animatedRef.current.add(m.id)}
                 />
               )
             )}
@@ -1071,6 +1082,7 @@ function BotBubble({
   onPick,
   animate = false,
   onTick,
+  onAnimated,
 }: {
   message: ChatMessage;
   channel: string;
@@ -1083,6 +1095,8 @@ function BotBubble({
    */
   animate?: boolean;
   onTick?: () => void;
+  /** Reported when the reveal starts, so the page can avoid replaying it later. */
+  onAnimated?: () => void;
 }) {
   const turn = message.turn;
   const sensitive = turn?.sensitive;
@@ -1138,7 +1152,12 @@ function BotBubble({
             </p>
           )}
 
-          <TypedRichText text={message.text} animate={animate} onTick={onTick} />
+          <TypedRichText
+            text={message.text}
+            animate={animate}
+            onTick={onTick}
+            onAnimated={onAnimated}
+          />
 
           {/* Spell-corrections are surfaced so the employee can see the bot
               understood them, rather than silently answering a different

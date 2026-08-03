@@ -65,10 +65,11 @@
   --shadow-lg: 0 12px 32px rgba(16, 19, 26, 0.1), 0 2px 8px rgba(16, 19, 26, 0.05);
   --shadow-primary: 0 6px 18px rgba(42, 120, 214, 0.24);
 
-  /* Inter via next/font (see app/layout.tsx), with the old system stack kept as the
-     fallback so a failed font load degrades to what shipped before rather than to
-     Times New Roman. */
-  --font-sans: var(--font-inter), system-ui, -apple-system, 'Segoe UI', Roboto,
+  /* Figtree via next/font (see app/layout.tsx) — the open face closest to Claude's
+     Styrene that also holds its spacing at this app's sizes. The old system stack
+     stays as the fallback so a failed font load degrades to what shipped before
+     rather than to Times New Roman. */
+  --font-sans: var(--font-ui), system-ui, -apple-system, 'Segoe UI', Roboto,
     'Helvetica Neue', sans-serif;
   --font-mono: var(--font-mono-face), ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -202,11 +203,11 @@
     line-height: 1.55;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    /* Inter ships a straight-sided 'a' and a disambiguated '1' behind these two
-       features, which is the difference between it reading as a generic webfont and
-       reading like the product interfaces it is meant to sit alongside. */
-    font-feature-settings: 'cv11', 'ss01';
-    font-optical-sizing: auto;
+    /* No feature overrides: 'cv11'/'ss01' were Inter's alternate glyph sets and mean
+       nothing in Figtree, which draws the shapes that give it its character by
+       default. Leaving them applied to a face that does not define them is harmless
+       but misleading to the next reader. */
+    font-feature-settings: normal;
   }
 
   code,
@@ -922,10 +923,74 @@ td:has(> .tabular),
   }
 }
 
-/* The ticket mailbox collapses to one column on a phone: a 240px list beside a
-   thread leaves neither enough room to read. */
-@media (max-width: 720px) {
-  .tickets-layout {
-    grid-template-columns: 1fr !important;
+/* ---------------------------------------------------------------------------
+   The ticket mailbox
+   --------------------------------------------------------------------------- */
+
+/*
+ * A full-height two-pane shell. dvh rather than vh because on iOS Safari the
+ * address bar makes vh taller than the visible area, which would push the reply box
+ * below the fold — the one control the page exists to offer.
+ */
+.tickets-shell {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tickets-body {
+  flex: 1;
+  display: flex;
+  min-height: 0; /* lets the children scroll instead of growing the page */
+}
+
+.tickets-list {
+  width: 370px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* See the note on .tickets-thread — same reason. */
+  min-width: 0;
+}
+
+
+.tickets-thread {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--background);
+  /*
+   * A guard, not a fix for anything observed: a flex item's default minimum is its
+   * content's intrinsic width, so one long unbreakable string — a ticket id, a URL
+   * pasted into a reply — would otherwise push this pane wider than the viewport
+   * instead of wrapping. Same reasoning as the min-height above, one axis over.
+   */
+  min-width: 0;
+}
+
+/*
+ * One pane at a time on a phone. A 370px list beside a thread leaves neither enough
+ * room to read, so the shell switches between them and the thread grows a back
+ * button — the pattern every mail client on a phone already uses.
+ */
+@media (max-width: 860px) {
+  .tickets-list {
+    width: 100%;
+    border-right: none;
+  }
+  .tickets-shell[data-view='thread'] .tickets-list,
+  .tickets-shell[data-view='list'] .tickets-thread {
+    display: none;
+  }
+}
+
+@media (min-width: 861px) {
+  .tickets-back {
+    display: none !important;
   }
 }
