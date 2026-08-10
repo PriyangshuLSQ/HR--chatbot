@@ -67,9 +67,28 @@ public class SecurityConfig {
     boolean configured = clients.getIfAvailable() != null;
 
     if (!props.shouldSecure(configured)) {
+      // Rule 3 of the Phase 1 privacy requirements: no employee data before a verified
+      // identity. This branch serves every endpoint open, so on a deployment holding the
+      // employee extract it is not a warning-worthy compromise — it is the breach. Refusing
+      // to start is the only version of this check that cannot be ignored, and a warning in
+      // a log nobody reads is exactly how an open deployment reaches production.
+      //
+      // Local development still works: leave `hr.auth.require` at its default of false and
+      // the service runs open, as it did before Entra existed.
+      if (props.requireAuthentication()) {
+        throw new IllegalStateException(
+            "hr.auth.require=true but sign-in is not usable ("
+                + (configured ? "hr.auth.enabled=false" : "no client-id configured")
+                + "). Refusing to start: this profile would serve every endpoint, including "
+                + "employee data, without authentication. Configure Entra, or unset "
+                + "hr.auth.require for local development.");
+      }
+
       log.warn(
           "Entra sign-in is OFF ({}). Every endpoint is open and the frontend's demo login is in"
-              + " use. Do not run this way anywhere real.",
+              + " use. Do not run this way anywhere real, and never with a loaded employee"
+              + " extract — set hr.auth.require=true in any deployed profile to make this state"
+              + " a startup failure.",
           configured ? "hr.auth.enabled=false" : "no client-id configured");
 
       http.authorizeHttpRequests(registry -> registry.anyRequest().permitAll())

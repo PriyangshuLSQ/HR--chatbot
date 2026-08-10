@@ -1,0 +1,43 @@
+{
+  "_comment": "PLACEHOLDER MATRIX — NOT HR OPS DATA. These slabs are structurally realistic so the calculator, its tests and the chat path can be exercised end to end, but the numbers are invented. Replace wholesale with the department-wise matrix from the Compensation & Variable Pay Policy before UAT, and set knowledge.payroll.matrix to point at the real file if it lives outside the jar. Every payout answer quotes the version below, so a placeholder figure is always identifiable as one.",
+  "version": "PLACEHOLDER-0",
+  "effectiveFrom": "2026-04-01",
+  "departments": [
+    {
+      "name": "Sales",
+      "notes": "Commission-style curve: nothing below 60%, accelerator above target.",
+      "maxPayoutPercentOfTarget": 150,
+      "slabs": [
+        { "fromPercentInclusive": 60, "toPercentInclusive": 69.99, "payoutPercentOfTarget": 50 },
+        { "fromPercentInclusive": 70, "toPercentInclusive": 79.99, "payoutPercentOfTarget": 70 },
+        { "fromPercentInclusive": 80, "toPercentInclusive": 89.99, "payoutPercentOfTarget": 85 },
+        { "fromPercentInclusive": 90, "toPercentInclusive": 99.99, "payoutPercentOfTarget": 95 },
+        { "fromPercentInclusive": 100, "toPercentInclusive": 109.99, "payoutPercentOfTarget": 100 },
+        { "fromPercentInclusive": 110, "toPercentInclusive": 119.99, "payoutPercentOfTarget": 120 },
+        { "fromPercentInclusive": 120, "toPercentInclusive": null, "payoutPercentOfTarget": 150 }
+      ]
+    },
+    {
+      "name": "Engineering",
+      "notes": "Flatter curve, organisation-linked rather than individual quota.",
+      "maxPayoutPercentOfTarget": 120,
+      "slabs": [
+        { "fromPercentInclusive": 70, "toPercentInclusive": 79.99, "payoutPercentOfTarget": 60 },
+        { "fromPercentInclusive": 80, "toPercentInclusive": 89.99, "payoutPercentOfTarget": 80 },
+        { "fromPercentInclusive": 90, "toPercentInclusive": 99.99, "payoutPercentOfTarget": 90 },
+        { "fromPercentInclusive": 100, "toPercentInclusive": 109.99, "payoutPercentOfTarget": 100 },
+        { "fromPercentInclusive": 110, "toPercentInclusive": null, "payoutPercentOfTarget": 120 }
+      ]
+    },
+    {
+      "name": "default",
+      "notes": "Applies to any department without its own matrix.",
+      "maxPayoutPercentOfTarget": 110,
+      "slabs": [
+        { "fromPercentInclusive": 70, "toPercentInclusive": 89.99, "payoutPercentOfTarget": 75 },
+        { "fromPercentInclusive": 90, "toPercentInclusive": 99.99, "payoutPercentOfTarget": 90 },
+        { "fromPercentInclusive": 100, "toPercentInclusive": null, "payoutPercentOfTarget": 110 }
+      ]
+    }
+  ]
+}

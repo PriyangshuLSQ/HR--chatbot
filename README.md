@@ -58,8 +58,9 @@ with verbatim quoted passages.
 - **Frontend**: Next.js 16 with React 19
 - **Backend**: Spring Boot 3.5 (Java 21) in `backend/`, proxied at `/api/*`
 - **Styling**: Custom CSS with Tailwind utilities (no UI libraries)
-- **AI**: Ollama (`nomic-embed-text` + `qwen3.5:4b`) over plain `fetch` — no ML
-  dependency in `package.json`. The answer is written by the model in its own
+- **AI**: the Claude API (`claude-haiku-4-5`) writes answers; Ollama
+  (`nomic-embed-text`) is the embedder only — no ML dependency in `package.json`.
+  The answer is written by the model in its own
   words from the retrieved passages, never copied out of them; see
   [`docs/AI-SETUP.md`](docs/AI-SETUP.md) for how to judge a model swap
 - **Storage**: Passages and vectors in **Qdrant**; tickets, answer ratings and
@@ -264,8 +265,10 @@ Tuning knobs:
   `lib/knowledge/types.ts`
 - Chunk size and overlap: `lib/knowledge/chunk.ts`
 - The grounding prompt: `SYSTEM_PROMPT` in `lib/knowledge/rag.ts`
-- Models: `OLLAMA_CHAT_MODEL` / `OLLAMA_EMBED_MODEL` in the backend's environment
-  (defaults in `backend/src/main/resources/application.yml`)
+- Models: `CLAUDE_MODEL` (answers) / `OLLAMA_EMBED_MODEL` (embeddings) in the
+  backend's environment (defaults in
+  `backend/src/main/resources/application.yml`); latency and cost notes in
+  [`docs/AI-SETUP.md`](docs/AI-SETUP.md)
 - The grounding rules — synthesise in own words, answer the question asked, never
   calculate: `SYSTEM_PROMPT` in `backend/.../rag/RagService.java`
 

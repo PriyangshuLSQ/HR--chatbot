@@ -1,11 +1,14 @@
 package com.leadsquared.hr.knowledge.parse;
 
 import com.leadsquared.hr.knowledge.model.SourceKind;
+import com.leadsquared.hr.knowledge.parse.ImageTextExtractor.Extraction;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -30,6 +33,9 @@ final class DocxParser {
 
   private static final String BODY_PART = "word/document.xml";
 
+  /** Where Word keeps embedded images, whatever their original format. */
+  private static final String MEDIA_PREFIX = "word/media/";
+
   private static final Pattern BODY =
       Pattern.compile("<w:body\\b[^>]*>(.*)</w:body>", Pattern.DOTALL);
   private static final Pattern PARAGRAPH =
@@ -53,43 +59,107 @@ final class DocxParser {
         && bytes[3] == 4;
   }
 
-  static ParsedFile parse(byte[] bytes) {
-    String xml = readEntry(bytes);
-    if (xml == null) {
+  static ParsedFile parse(byte[] bytes, ImageTextExtractor ocr) {
+    Contents contents = read(bytes);
+    if (contents.xml() == null) {
       throw new UnsupportedFileException(
           "That .docx has no readable document body. It may be corrupt or password-protected.");
     }
 
-    String text = toMarkdown(xml);
-    if (text.isBlank()) {
+    String text = toMarkdown(contents.xml());
+
+    // How many images the body actually references. Counted from <w:drawing> rather than
+    // from word/media, because media also holds parts nothing in the body points at — a
+    // header logo, or an image left behind by an earlier edit.
+    int drawings = (int) DRAWING.matcher(contents.xml()).results().count();
+    int totalImages = Math.max(drawings, contents.images().size());
+
+    Extraction extraction =
+        contents.images().isEmpty() ? Extraction.NONE : ocr.extractText(contents.images());
+
+    String combined = ImageText.append(text, extraction);
+
+    // A .docx whose content is entirely a scan used to be a hard failure. It is now only
+    // a failure if OCR could not rescue it either, so the message distinguishes "images
+    // cannot be read here" from "they were read and held nothing".
+    if (combined.isBlank()) {
       throw new UnsupportedFileException(
-          "No text could be extracted from that .docx. If the content is images or scans, "
-              + "the text needs to be typed or OCR-ed first.");
+          ocr.isAvailable()
+              ? "No text could be extracted from that .docx, including from its "
+                  + totalImages
+                  + " image(s). If it is a scan, check that the pages are legible."
+              : "No text could be extracted from that .docx. Its content appears to be "
+                  + "images or scans, and reading text from images is not configured — set "
+                  + "an Anthropic API key, or type the text in by hand.");
     }
 
-    // Images and embedded objects are silently dropped; say so rather than let
-    // HR assume a diagram-heavy policy was fully ingested.
     List<String> notes = new ArrayList<>();
-    long images = DRAWING.matcher(xml).results().count();
-    if (images > 0) {
-      notes.add(images + " image" + (images > 1 ? "s" : "") + " skipped — only text is indexed.");
-    }
+    ImageText.describe(notes, totalImages, extraction, ocr.isAvailable());
 
-    return new ParsedFile(SourceKind.DOCX, text, notes);
+    return new ParsedFile(SourceKind.DOCX, combined, notes);
   }
 
-  private static String readEntry(byte[] bytes) {
+  /** The body XML plus every embedded image, from a single pass over the archive. */
+  private record Contents(String xml, List<ImageTextExtractor.Image> images) {}
+
+  /**
+   * Reads the body and the media parts in one pass.
+   *
+   * <p>One pass because {@link ZipInputStream} is forward-only — it cannot seek back to
+   * an earlier entry, so reading each part separately would mean re-inflating everything
+   * ahead of it.
+   *
+   * <p>Images are sorted by entry name at the end. Word numbers media parts in the order
+   * they were added to the document ({@code image1.png}, {@code image2.png}), which is
+   * usually reading order and is the only ordering signal available — the archive's own
+   * entry order carries none.
+   */
+  private static Contents read(byte[] bytes) {
+    String xml = null;
+    List<ImageTextExtractor.Image> images = new ArrayList<>();
+
     try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(bytes))) {
       ZipEntry entry;
       while ((entry = zip.getNextEntry()) != null) {
-        if (BODY_PART.equals(entry.getName())) {
-          return new String(zip.readAllBytes(), StandardCharsets.UTF_8);
+        String name = entry.getName();
+        if (BODY_PART.equals(name)) {
+          xml = new String(zip.readAllBytes(), StandardCharsets.UTF_8);
+        } else if (name.startsWith(MEDIA_PREFIX) && !entry.isDirectory()) {
+          String mediaType = mediaTypeFor(name);
+          if (mediaType != null) {
+            images.add(new ImageTextExtractor.Image(zip.readAllBytes(), mediaType, name));
+          }
         }
       }
-      return null;
     } catch (IOException e) {
-      return null;
+      // Truncated or corrupt archive: keep whatever was read before the failure, so a
+      // document damaged only at the end still ingests.
+      return new Contents(xml, sortedByName(images));
     }
+    return new Contents(xml, sortedByName(images));
+  }
+
+  private static List<ImageTextExtractor.Image> sortedByName(
+      List<ImageTextExtractor.Image> images) {
+    return images.stream().sorted(Comparator.comparing(ImageTextExtractor.Image::label)).toList();
+  }
+
+  /**
+   * Maps a media part's extension onto an IANA type, or null if it is not an image the
+   * vision API accepts.
+   *
+   * <p>{@code .emf} and {@code .wmf} — what Word writes when a drawing or chart is
+   * pasted from another Office app — and {@code .svg} land here regularly. Returning
+   * null leaves them counted as skipped rather than attempted and failed, which is the
+   * honest description: nothing tried to read them.
+   */
+  private static String mediaTypeFor(String name) {
+    String lower = name.toLowerCase(Locale.ROOT);
+    if (lower.endsWith(".png")) return "image/png";
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+    if (lower.endsWith(".gif")) return "image/gif";
+    if (lower.endsWith(".webp")) return "image/webp";
+    return null;
   }
 
   private static String toMarkdown(String xml) {

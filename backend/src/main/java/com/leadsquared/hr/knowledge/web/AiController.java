@@ -3,9 +3,13 @@ package com.leadsquared.hr.knowledge.web;
 import com.fasterxml.jackson.annotation.JsonValue;
 import com.leadsquared.hr.knowledge.model.KnowledgeAnswer;
 import com.leadsquared.hr.knowledge.model.StoreStats;
+import com.leadsquared.hr.knowledge.claude.ClaudeClient;
+import com.leadsquared.hr.knowledge.claude.ClaudeStatus;
 import com.leadsquared.hr.knowledge.ollama.OllamaClient;
 import com.leadsquared.hr.knowledge.ollama.OllamaStatus;
+import com.leadsquared.hr.knowledge.employee.EmployeeAnswerService;
 import com.leadsquared.hr.knowledge.rag.RagService;
+import org.springframework.security.concurrent.DelegatingSecurityContextExecutorService;
 import com.leadsquared.hr.knowledge.store.KnowledgeStore;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -37,19 +41,43 @@ public class AiController {
   private static final int MAX_HISTORY_TURNS = 6;
 
   /**
-   * Virtual threads: a streamed answer is almost entirely spent blocked on Ollama,
-   * so the cost of one is a parked thread rather than a platform thread, and
-   * concurrent chats are not capped by a pool size.
+   * Virtual threads: a streamed answer is almost entirely spent blocked on the
+   * Claude API, so the cost of one is a parked thread rather than a platform thread,
+   * and concurrent chats are not capped by a pool size. This matters more now than
+   * it did against a local model — one laptop could only generate one answer at a
+   * time anyway, whereas a hosted API will happily serve every employee at once.
    */
-  private final ExecutorService streamExecutor = Executors.newVirtualThreadPerTaskExecutor();
+  /**
+   * Generation runs off the request thread, so the security context has to travel with it.
+   *
+   * <p>{@code SecurityContextHolder} is thread-local. Without this wrapper the streamed path
+   * would resolve no signed-in user, and every question about the employee's own record would
+   * be answered "please sign in" while the identical question on the non-streamed path worked
+   * — the confusing half-failure that comes of identity being ambient. Wrapping keeps identity
+   * ambient <em>and</em> correct, which is what lets {@code EmployeeDataService} take it from
+   * the session rather than from a parameter.
+   */
+  private final ExecutorService streamExecutor =
+      new DelegatingSecurityContextExecutorService(Executors.newVirtualThreadPerTaskExecutor());
 
   private final RagService rag;
+
+  /** Owns the privacy routing. Questions go through here, never straight to {@code rag}. */
+  private final EmployeeAnswerService answers;
   private final OllamaClient ollama;
+  private final ClaudeClient claude;
   private final KnowledgeStore store;
 
-  public AiController(RagService rag, OllamaClient ollama, KnowledgeStore store) {
+  public AiController(
+      RagService rag,
+      EmployeeAnswerService answers,
+      OllamaClient ollama,
+      ClaudeClient claude,
+      KnowledgeStore store) {
     this.rag = rag;
+    this.answers = answers;
     this.ollama = ollama;
+    this.claude = claude;
     this.store = store;
   }
 
@@ -93,7 +121,7 @@ public class AiController {
 
     try {
       return ResponseEntity.ok(
-          rag.ask(question, history, Boolean.TRUE.equals(body.extractiveOnly())));
+          answers.ask(question, history, Boolean.TRUE.equals(body.extractiveOnly()), null));
     } catch (RuntimeException e) {
       // Answering is best-effort — a failure here must not break the chat, so
       // report "nothing found" and let the caller escalate to a human.
@@ -143,7 +171,7 @@ public class AiController {
         () -> {
           try {
             KnowledgeAnswer answer =
-                rag.askStreaming(
+                answers.askStreaming(
                     question,
                     history,
                     piece -> {
@@ -154,7 +182,8 @@ public class AiController {
                         // Abort generation rather than writing into a dead socket.
                         throw new StreamClosed();
                       }
-                    });
+                    },
+                    null);
 
             emitter.send(SseEmitter.event().name("answer").data(answer));
             emitter.complete();
@@ -220,24 +249,37 @@ public class AiController {
     }
   }
 
-  public record AiStatus(Capability capability, OllamaStatus ollama, StoreStats stats, String summary) {}
+  /**
+   * Two backends, reported separately, because they fail independently and the fixes
+   * are unrelated: {@code ollama} is the local embedder that makes the Qdrant index
+   * searchable, {@code claude} is the hosted model that writes the answer. Losing
+   * the first drops the assistant to keyword search; losing the second drops it to
+   * quoting the passage.
+   */
+  public record AiStatus(
+      Capability capability,
+      OllamaStatus ollama,
+      ClaudeStatus claude,
+      StoreStats stats,
+      String summary) {}
 
   /**
    * Drives the admin console's AI panel.
    *
-   * <p>Deliberately reports the degraded states distinctly (offline / running but
-   * no models / models but nothing embedded yet) because each has a different
-   * one-line fix.
+   * <p>Deliberately reports the degraded states distinctly (embedder offline / no
+   * embedding model pulled / nothing embedded yet / no API key) because each has a
+   * different one-line fix.
    */
   @GetMapping("/status")
   public AiStatus status() {
     // Bypass the cache: this panel is how HR checks whether the model they just
     // installed has been picked up.
     OllamaStatus status = ollama.getStatus(true);
+    ClaudeStatus claudeStatus = claude.getStatus();
     StoreStats stats = store.stats();
 
     Capability capability;
-    if (status.canGenerate() && status.canEmbed() && stats.embeddedChunks() > 0) {
+    if (claudeStatus.configured() && status.canEmbed() && stats.embeddedChunks() > 0) {
       capability = Capability.GENERATIVE;
     } else if (status.canEmbed() && stats.embeddedChunks() > 0) {
       capability = Capability.SEMANTIC;
@@ -245,25 +287,34 @@ public class AiController {
       capability = Capability.KEYWORD;
     }
 
-    return new AiStatus(capability, status, stats, summarise(capability, status.ok(), stats.chunkCount()));
+    return new AiStatus(
+        capability,
+        status,
+        claudeStatus,
+        stats,
+        summarise(capability, status.ok(), claudeStatus, stats.chunkCount()));
   }
 
-  private static String summarise(Capability capability, boolean online, int chunks) {
+  private static String summarise(
+      Capability capability, boolean embedderOnline, ClaudeStatus claude, int chunks) {
+
     if (chunks == 0) {
       return "No documents uploaded yet. Add HR policies to give the assistant something to answer from.";
     }
     return switch (capability) {
       case GENERATIVE ->
-          "Full AI: semantic search over your documents, with answers written by the local model "
-              + "and grounded in the source text.";
+          "Full AI: semantic search over your documents, with answers written by "
+              + claude.model()
+              + " and grounded in the source text.";
       case SEMANTIC ->
-          "Semantic search is live, but no chat model is installed — employees see the matching "
-              + "policy passage rather than a written answer.";
+          "Semantic search is live, but no Anthropic API key is configured — employees see "
+              + "the matching policy passage rather than a written answer.";
       case KEYWORD ->
-          online
-              ? "Keyword search only. Pull an embedding model and rebuild the index to enable semantic matching."
-              : "Keyword search only — Ollama is offline. Everything still works; answers are quoted "
-                  + "from your documents.";
+          embedderOnline
+              ? "Keyword search only. Pull the embedding model and rebuild the index to enable "
+                  + "semantic matching."
+              : "Keyword search only — the local embedder is offline. Everything still works; "
+                  + "answers are quoted from your documents.";
     };
   }
 }

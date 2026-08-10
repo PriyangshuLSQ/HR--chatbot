@@ -48,41 +48,115 @@ modes you are actually in.
 | Mode | Requires | Employee sees |
 |---|---|---|
 | `keyword` | nothing | The matching passage, quoted |
-| `semantic` | an embedding model | The matching passage, found by meaning |
-| `generative` | embedding + chat model | A written answer, plus its sources |
+| `semantic` | a local embedding model | The matching passage, found by meaning |
+| `generative` | embedding model + Anthropic API key | A written answer, plus its sources |
+
+## The two halves, and why only one of them is hosted
+
+Answer writing runs on the **Claude API**. Embedding runs on a **local Ollama
+daemon**, and that split is not a half-finished migration — it is forced:
+
+- Anthropic has no embeddings endpoint.
+- Both Qdrant collections hold 768-dimensional `nomic-embed-text` vectors.
+- A query embedded by any other model lands in a different vector space. Cosine
+  similarity against the stored vectors then returns *plausible nonsense* — not an
+  error, just the wrong passages, which for an HR answer is the worst failure
+  available.
+
+So keeping the existing index means keeping the embedder local. Removing Ollama
+entirely is a corpus migration — pick a hosted embedding provider, change
+`knowledge.qdrant.vector-size`, drop both collections and re-embed every chunk —
+not a config change.
+
+What did go away: the 3.4 GB chat model, its context-window and output-token
+tuning, and the RAM contention that made the first question after a lull slow.
 
 ## Turning on the full AI
-
-Everything is open source and runs locally. No API key, no account, no HR data
-leaving the machine.
 
 ```bash
 # 1. Install Ollama — https://ollama.com/download
 #    macOS: brew install ollama && brew services start ollama
 
-# 2. Pull the two models (~3.7 GB total, one time)
-ollama pull nomic-embed-text   # 274 MB — embeddings for semantic search
-ollama pull qwen3.5:4b         # 3.4 GB — writes the grounded answers
+# 2. Pull the embedding model (274 MB, one time). No chat model is needed.
+ollama pull nomic-embed-text
 
 # 3. Confirm it is up
 curl http://127.0.0.1:11434/api/tags
+
+# 4. Set the Anthropic key — in application-local.yml (gitignored) or the environment
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+If you are coming from the local-model setup, `ollama rm qwen3.5:4b` reclaims the
+3.4 GB. Nothing reads it any more.
+
 Then open **Admin → Knowledge base** and press **Rebuild index**. That embeds
-any documents uploaded before the models were installed. The badge should flip
-to *Full AI · generating answers*.
+any documents uploaded before the embedding model was installed. The badge should
+flip to *Full AI · generating answers*.
 
-### Choosing models
+### Choosing a model
 
-`qwen3.5:4b` is the default. Before it, `qwen2.5:7b`; before that, `llama3.2` (3B).
-The 4B was chosen for a 16 GB machine that also runs the Java service, a Next dev
-server and an IDE — 3.4 GB of weights leaves headroom where 4.7 GB did not.
+`claude-haiku-4-5` is the default: fastest current model, $1/$5 per MTok against
+Opus 5's $5/$25, and this task is well within it. Most of the speed is not the model
+being small — it is that Haiku 4.5 does not think by default, so there is no
+pre-answer thinking phase. On Opus 5 that phase was ~4.6s of the ~8s an answer took.
 
-**Qwen3-family models are hybrid-reasoning.** `OllamaClient` sends `think: false`
-and strips any `<think>` block that arrives regardless. That is not cosmetic: a
-reasoning trace would be shown to the employee as their answer, and it would bury
-the `NOT_IN_DOCUMENTS` marker inside prose — turning a refusal into something the
-client reads as a real answer. `VisibleTextTest` pins that behaviour.
+`claude-opus-5` is the switch back if a wrong HR answer starts costing an employee
+real money or leave. Run the grounding cases below before trusting either model; the
+two hard ones are what a smaller model fails first.
+
+Two knobs behave differently on Haiku 4.5, and neither errors:
+
+- **`effort` does not exist on it** and would return a 400, so it is not sent. The
+  admin console shows the effort as `—`. It applies again on Opus 5.
+- **The minimum cacheable prefix is 4096 tokens**, against 512 on Opus 5. This system
+  prompt is ~1.2k, so prompt caching silently stops applying — `cache=read 0` in the
+  generate log is expected here, not a regression. Haiku is cheaper per token anyway.
+
+Tuning knobs, all environment-overridable:
+
+```bash
+CLAUDE_MODEL=claude-opus-5            # default claude-haiku-4-5
+KNOWLEDGE_CLAUDE_EFFORT=low           # low | medium | high | xhigh | max; ignored on Haiku 4.5
+CLAUDE_MAX_ANSWER_TOKENS=2000         # thinking AND visible answer, together
+CLAUDE_CACHE_SYSTEM_PROMPT=true       # inert on Haiku 4.5 (see above)
+```
+
+`KNOWLEDGE_CLAUDE_EFFORT` is deliberately not named `CLAUDE_EFFORT`: Claude Code
+injects a variable by that name into its own session environment, so a backend
+launched from inside one silently ran at `high` instead of `low`.
+
+`effort` is the main latency lever now that there is no local generation to tune.
+`low` is the default because the model is restating passages retrieval already
+selected, not solving anything. Raise it if the grounding cases start failing.
+
+**`max-answer-tokens` is not the 250 the local model had, and must not be.** It
+bounds thinking *and* the visible answer together; thinking is on by default on
+Claude Opus 5 and can consume most of a small budget before a single visible
+character. A ceiling sized to the answer alone truncates it mid-sentence. You are
+billed for what is produced, not for the headroom.
+
+**Do not "fix" latency by disabling thinking.** On Claude Opus 5 that risks internal
+reasoning tags leaking into the visible response — which for this product means a
+reasoning trace shown to an employee as their HR answer, exactly the failure the
+old `<think>` stripping existed to prevent. Lower `effort` instead; it is cheaper
+and has no such failure mode.
+
+### Reading the generate log
+
+`ClaudeClient` logs one line per answer:
+
+```
+generate model=… effort=… first-token=…ms total=…ms in=…tok out=…tok cache=read …/write … stop=…
+```
+
+- **`first-token`** is what makes a turn feel fast — network round trip plus
+  whatever thinking the effort level bought.
+- **`in` / `out`** are the bill.
+- **`cache=read N`** is the one to watch after any config change. The system prompt
+  is identical every turn and is marked cacheable; a read count stuck at `0` across
+  back-to-back questions means something upstream is varying the prefix, and input
+  cost has silently multiplied.
 
 ### Judging a model swap
 
@@ -102,27 +176,28 @@ Also check that an off-corpus question ("what is the wifi password") still comes
 back as a refusal rather than a helpful-sounding guess.
 
 The history, kept because it is easy to assume small is fine: `llama3.2` (3B) was
-rejected on exactly those cases. The theory had been that grounded rewriting is
-easy — the model only has to restate a passage, not *know* anything. That was wrong
-in a way worth recording, because it is not a prose-quality problem, it is a
-correctness one.
+rejected on exactly those cases, back when generation was local. The theory had been
+that grounded rewriting is easy — the model only has to restate a passage, not
+*know* anything. That was wrong in a way worth recording, because it is not a
+prose-quality problem, it is a correctness one. The same test applies to a hosted
+model at a lower effort setting: run the cases, do not assume.
 
-If 3.4 GB is more than you want, `qwen3:1.7b` and `qwen3:4b` are smaller, and
-`llama3.2` smaller still — but re-run the two cases above before trusting any of
-them. Larger is available too: `qwen3.5:9b` (6.6 GB) is the biggest that fits this
-16 GB machine with the rest of the stack running. Override without touching code:
+### The embedding model
 
 ```bash
-OLLAMA_CHAT_MODEL=qwen3.5:9b
 OLLAMA_EMBED_MODEL=nomic-embed-text
 OLLAMA_URL=http://127.0.0.1:11434
 ```
 
-If you change the embedding model, run **Rebuild index** — vectors from
-different models are not comparable, and mixing them silently degrades search.
+**Changing this invalidates every vector in Qdrant, and run Rebuild index if you
+do.** A different width fails loudly — Qdrant rejects the search against
+`vector-size: 768`. A same-width different model fails *silently*, which is worse:
+the numbers are comparable, the meanings are not, and search quietly degrades.
 
-If a configured model is not installed, the app falls back to any suitable
-installed model of the right kind rather than failing.
+If the configured embedding model is not installed, the app falls back to any
+installed embedding model rather than failing. That is a convenience for a fresh
+index and a hazard for an existing one — if `embedModel` in the admin panel is not
+what built the collection, reindex.
 
 ## Where things live
 

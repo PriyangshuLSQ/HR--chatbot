@@ -982,7 +982,7 @@ function AiEnginePanel({
     return <div className="skeleton" style={{ height: 150, borderRadius: 'var(--radius)' }} />;
   }
 
-  const { ollama, stats } = ai;
+  const { ollama, claude, stats } = ai;
 
   return (
     <section className="card" style={{ padding: '1.125rem', display: 'grid', gap: '0.875rem' }}>
@@ -1015,7 +1015,7 @@ function AiEnginePanel({
         }}
       >
         <div>
-          <dt className="label-caps">Runtime</dt>
+          <dt className="label-caps">Embedder</dt>
           <dd>{ollama.ok ? `Ollama · ${ollama.url}` : 'Not running'}</dd>
         </div>
         <div>
@@ -1024,7 +1024,12 @@ function AiEnginePanel({
         </div>
         <div>
           <dt className="label-caps">Answer model</dt>
-          <dd>{ollama.chatModel ?? '—'}</dd>
+          <dd>
+            {claude.configured ? claude.model : '—'}
+            {claude.configured && claude.effort ? (
+              <span style={{ color: 'var(--muted-foreground)' }}> · {claude.effort} effort</span>
+            ) : null}
+          </dd>
         </div>
         <div>
           <dt className="label-caps">Index</dt>
@@ -1033,6 +1038,26 @@ function AiEnginePanel({
           </dd>
         </div>
       </dl>
+
+      {/*
+        Two independent hints, not one. The embedder and the answer model fail for
+        unrelated reasons and are fixed in different places — collapsing them into a
+        single banner would show one fix while hiding the other.
+      */}
+      {claude.hint && (
+        <div
+          style={{
+            fontSize: '0.8125rem',
+            padding: '0.75rem 0.875rem',
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--warning-soft)',
+            color: 'var(--warning-ink)',
+            border: '1px solid var(--warning)',
+          }}
+        >
+          <RichText text={claude.hint} />
+        </div>
+      )}
 
       {ollama.hint && (
         <div
@@ -1111,11 +1136,11 @@ function UploadZone({
     setBusy(true);
     setError(null);
     // Report unsupported files alongside the real results rather than dropping
-    // them silently — HR would otherwise assume the .pdf went in.
+    // them silently — HR would otherwise assume the file went in.
     const skipped: UploadOutcome[] = rejected.map((f) => ({
       filename: f.name,
       ok: false,
-      error: 'Unsupported format — convert to .docx, .txt, .md or .csv first.',
+      error: 'Unsupported format — convert to .pdf, .docx, .txt, .md or .csv first.',
     }));
 
     try {
@@ -1137,9 +1162,10 @@ function UploadZone({
         Upload HR documents
       </h2>
       <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)', marginBottom: '1rem' }}>
-        Word (.docx), plain text (.txt), Markdown (.md) or spreadsheets exported as .csv. Each
-        document is split into passages and indexed — employees can ask about it straight away,
-        and there is no retraining step.
+        PDF, Word (.docx), plain text (.txt), Markdown (.md) or spreadsheets exported as .csv.
+        Text inside images — a scanned circular, a screenshot of a table — is read and indexed
+        too. Each document is split into passages and indexed: employees can ask about it
+        straight away, and there is no retraining step.
       </p>
 
       <label style={{ display: 'block', marginBottom: '0.875rem' }}>

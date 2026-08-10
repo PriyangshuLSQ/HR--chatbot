@@ -12,7 +12,7 @@
  */
 
 /** Where a document came from. Drives how it is parsed and displayed. */
-export type SourceKind = 'txt' | 'md' | 'csv' | 'docx' | 'manual';
+export type SourceKind = 'txt' | 'md' | 'csv' | 'docx' | 'pdf' | 'manual';
 
 export interface KnowledgeChunk {
   id: string;
@@ -104,7 +104,11 @@ export const STRONG_RELEVANCE = 0.55;
 export type AnswerMode =
   | 'generated' // LLM wrote it, grounded in retrieved chunks
   | 'extractive' // no LLM available; best passage returned verbatim
-  | 'none'; // nothing in the knowledge base was relevant
+  | 'none' // nothing in the knowledge base was relevant
+  // refused on privacy grounds — the question reached for another employee's data.
+  // Distinct from 'none': this is a definitive answer that already tells the employee
+  // where to go, so it must not fall through to the escalation path the way 'none' does.
+  | 'declined';
 
 export interface KnowledgeAnswer {
   mode: AnswerMode;

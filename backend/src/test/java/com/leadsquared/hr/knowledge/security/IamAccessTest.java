@@ -182,7 +182,7 @@ class IamAccessTest {
   void theConfiguredListStillGrantsTheConsoleWithNoAssignment() {
     assignNobody();
 
-    AuthProperties withAdmin = new AuthProperties(true, ADMIN_EMAIL, "/chat");
+    AuthProperties withAdmin = new AuthProperties(true, false, ADMIN_EMAIL, "/chat");
 
     assertThat(resolver(withAdmin).from(oidc(ADMIN_EMAIL, Map.of())).role())
         .isEqualTo(SignedInUser.HR_ADMIN);
@@ -209,7 +209,7 @@ class IamAccessTest {
     when(users.findByEmailIn(anyCollection()))
         .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("mongo down"));
 
-    AuthProperties withAdmin = new AuthProperties(true, ADMIN_EMAIL, "/chat");
+    AuthProperties withAdmin = new AuthProperties(true, false, ADMIN_EMAIL, "/chat");
 
     assertThat(resolver(withAdmin).from(oidc(ADMIN_EMAIL, Map.of())).role())
         .isEqualTo(SignedInUser.HR_ADMIN);
@@ -290,7 +290,7 @@ class IamAccessTest {
   }
 
   private static AuthProperties noAdmins() {
-    return new AuthProperties(true, "", "/chat");
+    return new AuthProperties(true, false, "", "/chat");
   }
 
   private static OidcUser oidc(String email, Map<String, Object> extraClaims) {

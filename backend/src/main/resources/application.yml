@@ -90,6 +90,14 @@ hr:
     # AuthProperties, which is what stops a misconfiguration from silently
     # leaving the API unauthenticated.
     enabled: ${AUTH_ENABLED:true}
+    # Fail startup instead of running open when sign-in is unusable.
+    #
+    # Default false so a fresh checkout with no credentials still boots. SET THIS TRUE IN
+    # EVERY DEPLOYED PROFILE, and certainly in any deployment holding the employee extract:
+    # the branch it guards serves every endpoint — including compensation, leave and
+    # performance data — with no authentication at all. It used to log a warning and carry
+    # on, which is how an open deployment reaches production. Now it refuses to start.
+    require: ${AUTH_REQUIRED:false}
     # Who sees the admin dashboard. An Entra app role named HR.Admin (or a
     # `roles` claim containing hr_admin) wins over this list; the list exists so
     # the console is usable before app roles are set up in the portal.
@@ -98,58 +106,147 @@ hr:
     success-path: /chat
 
 knowledge:
+  # Ollama is now an EMBEDDING service only. Answer writing moved to the Claude API
+  # below; what could not move is the embedder, because the Qdrant collections are
+  # built from nomic-embed-text and Anthropic has no embeddings endpoint. A query
+  # embedded by a different model lands in a different vector space, so retrieval
+  # would not error — it would return the wrong passages. Keeping the existing index
+  # means keeping this daemon.
+  #
+  # No chat model needs to be pulled any more: `ollama pull nomic-embed-text` is the
+  # whole local requirement, and the 3.4 GB of qwen3.5:4b weights can be removed with
+  # `ollama rm qwen3.5:4b`.
   ollama:
     url: ${OLLAMA_URL:http://127.0.0.1:11434}
+    # Changing this invalidates every vector in Qdrant. A different width fails loudly
+    # (Qdrant rejects the search); a same-width different model fails silently, which
+    # is worse. Either way it means a reindex, not a restart.
     embed-model: ${OLLAMA_EMBED_MODEL:nomic-embed-text}
-    # qwen3.5:4b — smaller and newer than the qwen2.5:7b it replaces, chosen
-    # because this is a 16 GB machine that already runs a Java service, a Next dev
-    # server and an IDE: 3.4 GB of weights leaves headroom where 4.7 GB did not.
-    #
-    # Size is not the thing that matters here, generation quality is. llama3.2 (3B)
-    # was rejected for failing the grounding prompt's two hardest rules — it
-    # answered the *nearest* retrieved question rather than the one asked, and
-    # copied passages verbatim. Any replacement has to pass those same cases; see
-    # the model-choice section of docs/AI-SETUP.md for what to re-run.
-    #
-    # Qwen3 models are hybrid-reasoning, so OllamaClient sends `think: false` and
-    # strips any <think> block that arrives anyway. Leaving those in would put a
-    # reasoning trace in front of an employee and hide the NOT_IN_DOCUMENTS marker
-    # inside it, which would turn a refusal into an apparent answer.
-    chat-model: ${OLLAMA_CHAT_MODEL:qwen3.5:4b}
     # How long Ollama holds the weights after a call. Its own default is 5 minutes,
     # which quietly makes the first question after any lull the slow one: the model
-    # is evicted and 3.4 GB is re-read from disk before a single token. Employees
-    # ask in bursts with gaps, so that was most first questions.
+    # is evicted and re-read from disk before the query can be embedded.
     #
-    # 30m keeps both models resident (3.4 GB chat + ~0.3 GB embed) inside a 16 GB
-    # budget. `-1` never evicts; lower it if this machine needs the RAM back
-    # between conversations. `load=` in the generate timing log is how to tell —
-    # anything above 0ms there means a reload was paid for.
+    # Much cheaper to honour than it used to be — this now keeps ~0.3 GB resident
+    # rather than that plus 3.4 GB of chat weights, so the RAM argument for lowering
+    # it has largely gone away. `-1` never evicts.
     keep-alive: ${OLLAMA_KEEP_ALIVE:30m}
-    # Ceiling on generated tokens, not a target. The system prompt asks for "2-5
-    # short sentences" (~100 tokens); this leaves headroom for the several-subject
-    # answers rule 6 asks for, while capping the tail — qwen3.5:4b pads generously
-    # when it declines, and generation is token-serial, so every extra token is
-    # time the employee waits. Raise it if answers start arriving clipped
-    # mid-sentence.
-    max-answer-tokens: ${OLLAMA_MAX_ANSWER_TOKENS:250}
-    # Context window, in tokens, holding the prompt AND the answer. Measured against
-    # qwen3.5:4b's own tokenizer: the 3,118-character system prompt is 724 tokens, a
-    # typical turn (system + 6,000 characters of extracts) is 2,118, and the worst
-    # case the callers permit — plus 4 history turns and a 2,000-character question —
-    # is 2,624. With max-answer-tokens that peaks near 2,900, so 4096 leaves roughly
-    # 1,200 tokens spare.
+
+  # The Claude API — answer writing.
+  claude:
+    # Never commit this. Put it in application-local.yml (gitignored, already
+    # imported above) or export ANTHROPIC_API_KEY. Blank is a supported state: the
+    # assistant falls back to extractive answers, exactly as it did when no chat
+    # model was pulled.
+    api-key: ${ANTHROPIC_API_KEY:}
+    # claude-haiku-4-5, because latency and cost were chosen over answer quality: it is
+    # the fastest current model and a fifth of Opus 5's price ($1/$5 per MTok against
+    # $5/$25), and this task — restate five retrieved passages in a few sentences, or
+    # decline — is well within it.
     #
-    # Pinned rather than left to Ollama because its default is not ours to rely on:
-    # it was 2048 for a long time, which would silently truncate a typical turn's
-    # extracts — and a truncated extract is a grounding failure that reads as a
-    # wrong answer, not as a config problem. A future default that honours the model's
-    # trained 32k window would go the other way and allocate a KV cache this
-    # 16 GB machine does not have to spare.
+    # Most of the speed is not the model being small, it is that Haiku 4.5 does not
+    # think by default. On Opus 5 thinking is on unless disabled, and it was costing
+    # ~4.6s before the first visible token; here there is no such phase.
     #
-    # Raise this only alongside max-context-chars in RagService; growing one without
-    # the other buys nothing.
-    num-context: ${OLLAMA_NUM_CTX:4096}
+    # Two things this model gives up, both of which the code handles rather than
+    # breaks on:
+    #   - `effort` does not exist on it and returns a 400. Not sent — see
+    #     ClaudeClient.supportsEffort.
+    #   - The minimum cacheable prefix is 4096 tokens, against 512 on Opus 5. This
+    #     system prompt is ~1.2k, so prompt caching silently stops applying: no error,
+    #     just `cache=read 0` in the generate log. Cheaper per token anyway, but it
+    #     means the caching knob below is inert on this model.
+    #
+    # claude-opus-5 is the switch back if the grounding cases start failing. The two
+    # hard ones (answering the *nearest* question rather than the one asked, and copying
+    # passages verbatim) are what a smaller model fails first — re-run them from
+    # docs/AI-SETUP.md rather than assuming this model holds the contract.
+    model: ${CLAUDE_MODEL:claude-haiku-4-5}
+    # Ceiling on ONE response, covering thinking and the visible answer together.
+    #
+    # Deliberately not the 250 the local model was given. On a thinking model the
+    # thinking is billed and counted inside this budget, so a ceiling sized to the
+    # answer alone truncates it mid-sentence — the failure looks like a broken answer,
+    # not like a config problem. The headroom stays even though the default model does
+    # not think, so that switching back to Opus 5 does not need this raised again.
+    # Nothing is charged for headroom; the bill is what the model actually produces.
+    max-answer-tokens: ${CLAUDE_MAX_ANSWER_TOKENS:2000}
+    # low | medium | high | xhigh | max — how hard the model works, and the main
+    # latency lever on the models that support one.
+    #
+    # Ignored on the default model: Haiku 4.5 has no effort parameter, so this value is
+    # not sent (the admin console shows the effort as "—" rather than claiming one that
+    # is not applied). It applies again the moment the model is switched back to Opus 5.
+    #
+    # `low` because the task is bounded and the passages are already selected: the
+    # model is not solving anything, it is restating retrieved text under a strict
+    # grounding contract. Raise it if the grounding cases start failing — a model
+    # answering the nearest question rather than the one asked is the symptom that
+    # more effort actually fixes.
+    #
+    # NOT named CLAUDE_EFFORT. Claude Code injects a CLAUDE_EFFORT variable into its own
+    # session environment, so a backend launched from inside one silently ran at `high`
+    # instead of `low` — the misconfiguration this whole latency problem started as.
+    effort: ${KNOWLEDGE_CLAUDE_EFFORT:low}
+    # The system prompt is byte-identical on every turn and sits ahead of everything
+    # volatile, which makes it exactly the prefix worth caching: after the first call
+    # in a 5-minute window it bills at roughly a tenth of input price instead of full.
+    # Watch `cache=read N` in the generate log — a read count stuck at 0 across
+    # back-to-back questions means something upstream is varying the prefix.
+    cache-system-prompt: ${CLAUDE_CACHE_SYSTEM_PROMPT:true}
+  # Reading text out of images inside uploads — a scanned circular, a screenshot of an
+  # entitlements table, a policy pasted in as a picture. Without this, a .docx or PDF
+  # whose content is an image indexes as nothing and the assistant answers "not in the
+  # documents" about a policy HR is certain it uploaded.
+  #
+  # Runs on the Claude vision API, not a local OCR engine: Tesseract is free per image
+  # but puts back the local-model dependency this service just removed (a native binary
+  # plus language data on every machine), and it is tuned for clean scanned prose rather
+  # than the screenshots and diagrams that actually turn up in HR documents.
+  ocr:
+    enabled: ${OCR_ENABLED:true}
+    # Deliberately NOT knowledge.claude.model. Answering is a per-question cost and wants
+    # the cheapest adequate model; this is a per-upload cost where accuracy matters more,
+    # and the two should be free to differ.
+    #
+    # Worth knowing before lowering it: claude-haiku-4-5 downsamples images to 1568px on
+    # the long edge, against 2576px on claude-opus-5 and claude-sonnet-5. On a dense
+    # scanned page that is the difference between small print being read and being
+    # guessed at. Haiku is the default because most images here are screenshots rather
+    # than dense scans; switch to claude-opus-5 if scans read badly.
+    model: ${OCR_MODEL:claude-haiku-4-5}
+    # Hard cap per upload. A 200-slide deck saved as .docx would otherwise be 200 vision
+    # calls inside one HTTP request. Images past the cap are reported as skipped, not
+    # silently dropped.
+    max-images-per-document: ${OCR_MAX_IMAGES:12}
+    # Images below this are skipped unread. Logos, bullet glyphs and signature squiggles
+    # are the bulk of images in a policy document and none carry text worth indexing;
+    # paying a vision call to discover that on every upload is waste.
+    min-image-bytes: ${OCR_MIN_IMAGE_BYTES:6144}
+    # Ceiling on one transcription. A dense A4 page is roughly 700-900 tokens of text.
+    max-answer-tokens: ${OCR_MAX_ANSWER_TOKENS:1500}
+  # The static HR extract — four .xlsx workbooks from HR Ops, loaded by an admin from the
+  # console. Not read at startup: importing replaces the whole employee collection, and that
+  # is not something a restart should do on its own.
+  employee-import:
+    directory: ${HR_EXTRACT_DIR:}
+    # The extract writes @lsq.com; Entra identities are @leadsquared.com. Without this rewrite
+    # the lookup keyed on the session email matches nothing and every employee is told they
+    # have no record — a total failure that looks exactly like an empty database.
+    from-domain: ${HR_EXTRACT_FROM_DOMAIN:lsq.com}
+    to-domain: ${HR_EXTRACT_TO_DOMAIN:leadsquared.com}
+    # Signed-in email -> employee code, for testing only. Deliberately EMPTY here.
+    #
+    # An entry makes one account resolve to another person's record, which is exactly what the
+    # privacy rules forbid — so it does not belong in committed configuration where it would
+    # ship to every deployment. Put it in application-local.yml (gitignored) instead:
+    #
+    #   knowledge:
+    #     employee-import:
+    #       identity-overrides:
+    #         "[someone@example.com]": LS00008
+    #
+    # Bracket quoting is required, or Spring reads the dots in the address as nested properties.
+    identity-overrides: {}
   qdrant:
     url: ${QDRANT_URL:http://127.0.0.1:6333}
     api-key: ${QDRANT_API_KEY:}

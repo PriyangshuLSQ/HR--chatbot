@@ -24,7 +24,16 @@ public record KnowledgeAnswer(
     /** No LLM available — the best passage, returned verbatim. */
     EXTRACTIVE("extractive"),
     /** Nothing in the knowledge base was relevant. */
-    NONE("none");
+    NONE("none"),
+    /**
+     * Refused on privacy grounds — the question reached for another employee's data.
+     *
+     * <p>A separate mode from {@link #NONE} because the two must not be handled alike: none
+     * means "look elsewhere" and falls through to the escalation path, while this is a
+     * definitive answer that already tells the employee where to go. Rendering a decline as
+     * a failed lookup would invite the client to retry it some other way.
+     */
+    DECLINED("declined");
 
     private final String wire;
 
@@ -40,5 +49,17 @@ public record KnowledgeAnswer(
 
   public static KnowledgeAnswer none(double confidence) {
     return new KnowledgeAnswer(Mode.NONE, "", List.of(), confidence, null, null);
+  }
+
+  /**
+   * A privacy refusal, carrying no data and no citations.
+   *
+   * <p>Confidence is 1.0 deliberately. It is not a retrieval score here — there was no
+   * retrieval — and the client drops answers below its confidence threshold, so a decline
+   * scored 0 would be discarded and replaced by a vaguer fallback. We are certain of this
+   * refusal, and the employee needs to see the reason rather than a non-answer.
+   */
+  public static KnowledgeAnswer declined(String message) {
+    return new KnowledgeAnswer(Mode.DECLINED, message, List.of(), 1.0, null, null);
   }
 }

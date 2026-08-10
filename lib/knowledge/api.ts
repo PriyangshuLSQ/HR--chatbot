@@ -18,18 +18,36 @@ export interface StoreStats {
 
 export type AiCapability = 'generative' | 'semantic' | 'keyword';
 
+/**
+ * The local embedding daemon. No longer writes answers — it produces the query
+ * vector the Qdrant index is searchable by, and nothing else. Offline means
+ * keyword-only search, not a broken assistant.
+ */
 export interface OllamaStatus {
   ok: boolean;
   url: string;
   models: string[];
   embedModel: string | null;
-  chatModel: string | null;
+  hint?: string;
+}
+
+/**
+ * The hosted answer model. `configured` reflects whether an API key is set, not a
+ * live probe — the backend deliberately does not spend a billed call per status
+ * poll, so a key that is present but rejected shows up on the next question rather
+ * than here.
+ */
+export interface ClaudeStatus {
+  configured: boolean;
+  model: string | null;
+  effort: string | null;
   hint?: string;
 }
 
 export interface AiStatus {
   capability: AiCapability;
   ollama: OllamaStatus;
+  claude: ClaudeStatus;
   stats: StoreStats;
   summary: string;
 }
@@ -109,8 +127,14 @@ export async function rebuildIndex(force = false): Promise<ReindexResult> {
   );
 }
 
-/** Accepted upload formats, shared by the file input and the drop handler. */
-export const ACCEPTED_EXTENSIONS = ['.txt', '.md', '.markdown', '.csv', '.tsv', '.docx'];
+/**
+ * Accepted upload formats, shared by the file input and the drop handler.
+ *
+ * `.pdf` is listed first because it is what HR reaches for. Text inside images in a PDF
+ * or .docx — a scanned circular, a screenshot of a table — is read at upload time and
+ * indexed with the rest; see `knowledge.ocr` in the backend config.
+ */
+export const ACCEPTED_EXTENSIONS = ['.pdf', '.docx', '.txt', '.md', '.markdown', '.csv', '.tsv'];
 
 export function isAcceptedFile(name: string): boolean {
   const lower = name.toLowerCase();

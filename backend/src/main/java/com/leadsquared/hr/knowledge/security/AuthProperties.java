@@ -11,11 +11,27 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param enabled whether to require a signed-in user. Only meaningful together
  *     with a configured client id — see {@link #shouldSecure(boolean)}, which is
  *     what decides.
+ * @param require fail startup rather than run open when sign-in is unusable. Off by
+ *     default for local development; on in every deployed profile.
  * @param adminEmails comma-separated accounts that get the HR admin dashboard
  * @param successPath where the browser lands after a successful sign-in
  */
 @ConfigurationProperties(prefix = "hr.auth")
-public record AuthProperties(boolean enabled, String adminEmails, String successPath) {
+public record AuthProperties(
+    boolean enabled, boolean require, String adminEmails, String successPath) {
+
+  /**
+   * Whether an unauthenticated deployment is a startup failure rather than a warning.
+   *
+   * <p>Default false, so a checkout with no credentials still runs. Set true in every
+   * deployed profile: it converts "every endpoint is open" from a log line into a refusal
+   * to boot, which is the only form of that check that survives contact with a hurried
+   * deploy. Required by the Phase 1 rule that no employee data is served before identity is
+   * verified — a rule a warning cannot enforce.
+   */
+  public boolean requireAuthentication() {
+    return require;
+  }
 
   /**
    * Whether the email/password path may create a session — only ever true when
