@@ -9,6 +9,7 @@ public enum SourceKind {
   MD("md"),
   CSV("csv"),
   DOCX("docx"),
+  PDF("pdf"),
   /** Typed straight into the admin console rather than uploaded. */
   MANUAL("manual");
 

@@ -6,10 +6,12 @@ import com.leadsquared.hr.knowledge.model.KnowledgeChunk;
 import com.leadsquared.hr.knowledge.model.KnowledgeDoc;
 import com.leadsquared.hr.knowledge.model.RetrievedChunk;
 import com.leadsquared.hr.knowledge.model.SourceKind;
-import com.leadsquared.hr.knowledge.ollama.ChatMessage;
+import com.leadsquared.hr.knowledge.claude.ChatMessage;
+import com.leadsquared.hr.knowledge.claude.ClaudeClient;
 import com.leadsquared.hr.knowledge.ollama.OllamaClient;
 import com.leadsquared.hr.knowledge.ollama.OllamaStatus;
 import com.leadsquared.hr.knowledge.parse.DocumentParser;
+import com.leadsquared.hr.knowledge.parse.ImageTextExtractor;
 import com.leadsquared.hr.knowledge.parse.ParsedFile;
 import com.leadsquared.hr.knowledge.parse.UnsupportedFileException;
 import com.leadsquared.hr.knowledge.retrieve.Retriever;
@@ -116,18 +118,50 @@ public class RagService {
   private static final Pattern EXTENSION = Pattern.compile("\\.[^.]+$");
   private static final Pattern WORD_SEPARATORS = Pattern.compile("[_-]+");
 
+  /**
+   * Confidence reported for an answer built from the employee's own record.
+   *
+   * <p>Retrieval confidence is meaningless on that path — the figure came from the record, not
+   * from a matched passage — and the chat client discards answers below its own threshold, so
+   * carrying a low retrieval score through would silently drop a correct answer.
+   */
+  private static final double PERSONAL_ANSWER_CONFIDENCE = 1.0;
+
   private final KnowledgeStore store;
   private final QdrantStore qdrant;
   private final Retriever retriever;
+
+  /**
+   * Retrieval and answering are now served by two different backends, and the split
+   * is not arbitrary: {@code ollama} produces the query vector that the existing
+   * Qdrant collections are searchable by, and {@code claude} writes the answer from
+   * whatever that retrieval returns. Only the second half is hosted.
+   */
   private final OllamaClient ollama;
+
+  private final ClaudeClient claude;
+
+  /**
+   * Reads text out of images at upload time. Ingest-only — it is never touched on the
+   * path of a question, which is why it can afford a different model from {@code claude}.
+   */
+  private final ImageTextExtractor imageText;
 
   private final AtomicLong docSeq = new AtomicLong();
 
-  public RagService(KnowledgeStore store, QdrantStore qdrant, Retriever retriever, OllamaClient ollama) {
+  public RagService(
+      KnowledgeStore store,
+      QdrantStore qdrant,
+      Retriever retriever,
+      OllamaClient ollama,
+      ClaudeClient claude,
+      ImageTextExtractor imageText) {
     this.store = store;
     this.qdrant = qdrant;
     this.retriever = retriever;
     this.ollama = ollama;
+    this.claude = claude;
+    this.imageText = imageText;
   }
 
   // -------------------------------------------------------------------------
@@ -139,7 +173,7 @@ public class RagService {
   public IngestResult ingestFile(
       byte[] bytes, String filename, String mimeType, String category, String uploadedBy) {
 
-    ParsedFile parsed = DocumentParser.parse(bytes, filename, mimeType);
+    ParsedFile parsed = DocumentParser.parse(bytes, filename, mimeType, imageText);
     return persist(
         parsed.kind(),
         parsed.text(),
@@ -328,10 +362,20 @@ public class RagService {
    */
   public KnowledgeAnswer askStreaming(
       String rawQuestion, List<Turn> history, Consumer<String> onToken) {
+    return askStreaming(rawQuestion, history, onToken, null);
+  }
+
+  /** @param personalContext see {@link #ask(String, List, boolean, String)}. */
+  public KnowledgeAnswer askStreaming(
+      String rawQuestion, List<Turn> history, Consumer<String> onToken, String personalContext) {
 
     String question = rawQuestion.trim();
     KnowledgeSnapshot snapshot = store.snapshot();
-    if (snapshot.chunks().isEmpty()) return KnowledgeAnswer.none(0);
+
+    // A personal question is answerable with no policy documents at all — "what is my grade"
+    // needs the record and nothing else.
+    boolean personal = personalContext != null && !personalContext.isBlank();
+    if (snapshot.chunks().isEmpty() && !personal) return KnowledgeAnswer.none(0);
 
     long startedAt = System.nanoTime();
     OllamaStatus status = ollama.getStatus();
@@ -350,25 +394,40 @@ public class RagService {
     long rankedAt = System.nanoTime();
     logRetrieval("ask/stream", startedAt, embeddedAt, searchedAt, rankedAt, retrieval);
 
-    if (retrieval.isEmpty() || retrieval.confidence() < Thresholds.RELEVANCE) {
+    // Low retrieval confidence ends a POLICY question — there is nothing to ground an answer
+    // in. It must not end a personal one: the record is already in hand, and its correctness
+    // has nothing to do with whether any policy passage happened to match. Returning "none"
+    // here is what made "LS02667 is from which department" fall through to escalation while
+    // the record sat fetched and discarded a line above.
+    if (!personal && (retrieval.isEmpty() || retrieval.confidence() < Thresholds.RELEVANCE)) {
       return KnowledgeAnswer.none(retrieval.confidence());
     }
 
     List<RetrievedChunk> hits = retrieval.hits();
     List<Citation> citations = hits.stream().map(RagService::toCitation).toList();
 
-    // No model, or extractive-only: there is nothing to stream. The caller still
+    // No answer model configured: there is nothing to stream. The caller still
     // gets a complete answer and simply renders it in one go.
-    if (!status.canGenerate()) {
+    if (!claude.isConfigured()) {
+      if (!canQuotePassage(hits)) {
+        // Personal question, no model, no passage to quote. Saying so beats an empty answer.
+        return new KnowledgeAnswer(
+            KnowledgeAnswer.Mode.NONE,
+            "",
+            citations,
+            reportedConfidence(personal, retrieval),
+            null,
+            "No Anthropic API key is configured, so your record cannot be written up as an"
+                + " answer.");
+      }
       return new KnowledgeAnswer(
           KnowledgeAnswer.Mode.EXTRACTIVE,
           extractiveAnswer(hits.get(0), retrieval.confidence()),
           citations,
-          retrieval.confidence(),
+          reportedConfidence(personal, retrieval),
           null,
-          status.ok()
-              ? null
-              : "Ollama is offline, so this is the matching policy passage rather than a written answer.");
+          "No Anthropic API key is configured, so this is the matching policy passage "
+              + "rather than a written answer.");
     }
 
     StringBuilder held = new StringBuilder();
@@ -378,9 +437,8 @@ public class RagService {
     long[] firstTokenAt = {0};
 
     String generated =
-        ollama.chatStream(
-            buildPrompt(question, hits, history),
-            status.chatModel(),
+        claude.chatStream(
+            buildPrompt(question, hits, history, personalContext),
             piece -> {
               if (released[0]) {
                 onToken.accept(piece);
@@ -418,7 +476,7 @@ public class RagService {
           citations,
           retrieval.confidence(),
           null,
-          "The local model did not respond in time — showing the source passage instead.");
+          "The answer model did not respond — showing the source passage instead.");
     }
 
     if (NOT_IN_DOCUMENTS.matcher(generated).find() || isNonAnswer(generated)) {
@@ -445,8 +503,8 @@ public class RagService {
         KnowledgeAnswer.Mode.GENERATED,
         stripCitationMarkers(generated),
         citations,
-        retrieval.confidence(),
-        status.chatModel(),
+        reportedConfidence(personal, retrieval),
+        claude.model(),
         null);
   }
 
@@ -479,10 +537,21 @@ public class RagService {
   }
 
   public KnowledgeAnswer ask(String rawQuestion, List<Turn> history, boolean extractiveOnly) {
+    return ask(rawQuestion, history, extractiveOnly, null);
+  }
+
+  /**
+   * @param personalContext the caller's own record, already rendered, or null for a policy
+   *     question. Never built here — {@code EmployeeAnswerService} owns that, so this class
+   *     has no access to employee data and cannot become a second place it is fetched.
+   */
+  public KnowledgeAnswer ask(
+      String rawQuestion, List<Turn> history, boolean extractiveOnly, String personalContext) {
     String question = rawQuestion.trim();
     KnowledgeSnapshot snapshot = store.snapshot();
 
-    if (snapshot.chunks().isEmpty()) return KnowledgeAnswer.none(0);
+    boolean personal = personalContext != null && !personalContext.isBlank();
+    if (snapshot.chunks().isEmpty() && !personal) return KnowledgeAnswer.none(0);
 
     long startedAt = System.nanoTime();
     OllamaStatus status = ollama.getStatus();
@@ -503,36 +572,54 @@ public class RagService {
     long rankedAt = System.nanoTime();
     logRetrieval("ask", startedAt, embeddedAt, searchedAt, rankedAt, retrieval);
 
-    if (retrieval.isEmpty() || retrieval.confidence() < Thresholds.RELEVANCE) {
+    // Low retrieval confidence ends a POLICY question — there is nothing to ground an answer
+    // in. It must not end a personal one: the record is already in hand, and its correctness
+    // has nothing to do with whether any policy passage happened to match. Returning "none"
+    // here is what made "LS02667 is from which department" fall through to escalation while
+    // the record sat fetched and discarded a line above.
+    if (!personal && (retrieval.isEmpty() || retrieval.confidence() < Thresholds.RELEVANCE)) {
       return KnowledgeAnswer.none(retrieval.confidence());
     }
 
     List<RetrievedChunk> hits = retrieval.hits();
     List<Citation> citations = hits.stream().map(RagService::toCitation).toList();
-    RetrievedChunk best = hits.get(0);
+    // Nullable now: a personal question can retrieve no passages at all.
+    RetrievedChunk best = canQuotePassage(hits) ? hits.get(0) : null;
 
-    if (extractiveOnly || !status.canGenerate()) {
+    if (extractiveOnly || !claude.isConfigured()) {
+      if (best == null) {
+        return new KnowledgeAnswer(
+            KnowledgeAnswer.Mode.NONE,
+            "",
+            citations,
+            reportedConfidence(personal, retrieval),
+            null,
+            "There is no policy passage to quote, and no answer model configured to write up"
+                + " your record.");
+      }
       return new KnowledgeAnswer(
           KnowledgeAnswer.Mode.EXTRACTIVE,
           extractiveAnswer(best, retrieval.confidence()),
           citations,
-          retrieval.confidence(),
+          reportedConfidence(personal, retrieval),
           null,
-          status.ok()
+          extractiveOnly
               ? null
-              : "Ollama is offline, so this is the matching policy passage rather than a written answer.");
+              : "No Anthropic API key is configured, so this is the matching policy passage "
+                  + "rather than a written answer.");
     }
 
-    String generated = ollama.chat(buildPrompt(question, hits, history), status.chatModel());
+    String generated = claude.chat(buildPrompt(question, hits, history, personalContext));
 
     if (generated == null) {
       return new KnowledgeAnswer(
-          KnowledgeAnswer.Mode.EXTRACTIVE,
-          extractiveAnswer(best, retrieval.confidence()),
+          best == null ? KnowledgeAnswer.Mode.NONE : KnowledgeAnswer.Mode.EXTRACTIVE,
+          best == null ? "" : extractiveAnswer(best, retrieval.confidence()),
           citations,
-          retrieval.confidence(),
+          reportedConfidence(personal, retrieval),
           null,
-          "The local model did not respond in time — showing the source passage instead.");
+          "The answer model did not respond"
+              + (best == null ? "." : " — showing the source passage instead."));
     }
 
     // The model is instructed to emit this token when the passages do not cover
@@ -546,8 +633,8 @@ public class RagService {
         KnowledgeAnswer.Mode.GENERATED,
         stripCitationMarkers(generated),
         citations,
-        retrieval.confidence(),
-        status.chatModel(),
+        reportedConfidence(personal, retrieval),
+        claude.model(),
         null);
   }
 
@@ -573,6 +660,26 @@ public class RagService {
     return NON_ANSWER.matcher(opening).find();
   }
 
+
+  /**
+   * The confidence to report. Retrieval score for a policy answer; a fixed high value for a
+   * personal one, where the number came from the record rather than from a matched passage.
+   */
+  private static double reportedConfidence(boolean personal, Retriever.Result retrieval) {
+    return personal ? PERSONAL_ANSWER_CONFIDENCE : retrieval.confidence();
+  }
+
+  /**
+   * Whether an extractive fallback is possible at all.
+   *
+   * <p>It needs a passage to quote. A personal question can legitimately retrieve none — "what
+   * is my grade" matches no policy text — so on that path there is nothing to fall back to and
+   * the caller has to say so instead of indexing into an empty list.
+   */
+  private static boolean canQuotePassage(List<RetrievedChunk> hits) {
+    return !hits.isEmpty();
+  }
+
   private static Citation toCitation(RetrievedChunk hit) {
     String snippet = WHITESPACE.matcher(hit.chunk().text()).replaceAll(" ");
     if (snippet.length() > 300) snippet = snippet.substring(0, 300);
@@ -591,9 +698,27 @@ public class RagService {
   // Prompting
   // -------------------------------------------------------------------------
 
+  /**
+   * The grounding contract.
+   *
+   * <p>The identity exception sits <b>above</b> the numbered rules rather than
+   * inside them, and that placement is the whole point: the rules are declared to
+   * be in order of importance, so an identity question reaching rule 7 gets
+   * NOT_IN_DOCUMENTS. Asked its name, the model answered "I am not listed as a
+   * person with authority to answer questions in the provided documents" — it had
+   * no way to know it was anything other than a document lookup. Anything stated
+   * as a lower-numbered rule would have been outranked by rule 1 instead.
+   *
+   * <p>Scoped tightly to questions about Robin itself. It is the one carve-out
+   * from "extracts only", and widening it — to greetings, to small talk, to
+   * "general HR knowledge" — would reopen exactly the ungrounded-answer hole the
+   * other nine rules exist to close.
+   */
   private static final String SYSTEM_PROMPT =
       """
-      You are the HR assistant for LeadSquared. You answer employee questions using ONLY the HR policy extracts provided in each message.
+      You are Robin, the HR assistant for LeadSquared. Employees come to you with questions about leave, payroll, benefits, ESOPs, reimbursements and company policy, and you answer them using ONLY the HR policy extracts provided in each message.
+
+      One exception to every rule below: if the employee asks about YOU — your name, what you are, what you can help with — answer from this paragraph, not from the extracts. You are Robin, LeadSquared's HR assistant; you answer HR questions from the company's own HR documents, and you point people to HR Operations for anything those documents do not cover. Say it in one short line and invite their question. Never reply NOT_IN_DOCUMENTS to a question about yourself, never say you are "not listed in the documents", and never suggest you are a person or an employee.
 
       Rules, in order of importance:
       1. Use only the provided extracts. Never use general knowledge about HR, employment law, or other companies.
@@ -607,13 +732,20 @@ public class RagService {
       6. Use EVERY extract that bears on the question, not just the first. Several documents usually each cover one part — variable pay, ESOPs, leave encashment, notice period. Cover each relevant part in its own short line, and name the subject at the start of the line so the employee can see which is which.
       7. If the extracts do not answer the question, reply with exactly: NOT_IN_DOCUMENTS
          Do this even if you could guess, and do it even when the extracts discuss the same general topic but not the thing asked. A wrong HR answer costs the employee real money or leave.
+         This never applies to a question about who you are — see the exception above the rules.
       8. If the extracts only partly answer it, give the part that is covered and say plainly what is not.
       9. Answer the employee directly in the second person. Do not mention "extracts", "context", "documents provided" or "based on the information".
 
       Style: 2-5 short sentences, or one short line per subject when several apply. Use **bold** for figures and deadlines. No preamble, no sign-off.""";
 
+  /**
+   * @param personalContext the caller's own employee record and any pre-computed payout,
+   *     already rendered — see {@code EmployeeFacts}. Null for a pure policy question.
+   *     Carried in the user turn rather than appended to {@link #SYSTEM_PROMPT} so the
+   *     system prefix stays byte-identical across every request and remains cacheable.
+   */
   private static List<ChatMessage> buildPrompt(
-      String question, List<RetrievedChunk> hits, List<Turn> history) {
+      String question, List<RetrievedChunk> hits, List<Turn> history, String personalContext) {
 
     List<ChatMessage> messages = new ArrayList<>();
     messages.add(ChatMessage.system(SYSTEM_PROMPT));
@@ -637,7 +769,11 @@ public class RagService {
       messages.add(turn.isUser() ? ChatMessage.user(text) : ChatMessage.assistant(text));
     }
 
-    messages.add(ChatMessage.user(contextBlock(hits) + "\n\nQuestion: " + question));
+    // The record goes ahead of the extracts: it is the more specific source, and when the two
+    // disagree — a policy stating the standard notice period against a record carrying this
+    // employee's actual one — the employee's own record is the answer.
+    String personal = personalContext == null || personalContext.isBlank() ? "" : personalContext + "\n\n";
+    messages.add(ChatMessage.user(personal + contextBlock(hits) + "\n\nQuestion: " + question));
     return messages;
   }
 

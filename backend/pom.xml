@@ -38,6 +38,56 @@
     -->
 
     <!--
+      Answer writing runs on the Claude API. This is the one dependency that is a
+      real SDK rather than hand-rolled HTTP, and deliberately so: the streaming
+      wire format is Server-Sent Events with a dozen event types, retries and
+      timeouts have non-obvious defaults, and getting any of it subtly wrong shows
+      up as a truncated HR answer rather than an exception.
+
+      Embedding does NOT go through here — Anthropic has no embeddings endpoint,
+      and the Qdrant collections are 768-dimensional nomic-embed-text vectors.
+      Query embedding stays on Ollama so the existing index keeps working; see
+      OllamaClient.
+    -->
+    <dependency>
+      <groupId>com.anthropic</groupId>
+      <artifactId>anthropic-java</artifactId>
+      <version>2.34.0</version>
+    </dependency>
+
+    <!--
+      PDF text extraction. The .txt/.md/.csv/.docx parsers are hand-rolled because
+      those formats are a ZIP plus some XML, or nothing at all; PDF is not that kind
+      of format. Its text is a stream of positioned glyph-drawing operators with no
+      notion of a word, a line or a reading order, so "extract the text" means
+      reconstructing all three from coordinates. That is what PDFBox's
+      PDFTextStripper does, and it is not worth reimplementing.
+
+      Also the source of the embedded images OCR reads: PDImageXObject exposes them
+      already decoded, so nothing here has to understand DCTDecode or CCITTFaxDecode.
+    -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.6</version>
+    </dependency>
+
+    <!--
+      Reading the HR extract. It arrives as .xlsx workbooks — six of them, with title
+      banners above the real header rows and a 183-column daily attendance register — so
+      this is not a CSV parse in disguise.
+
+      Streaming (SXSSF-style event reading) would use less memory, but the largest sheet
+      here is 32,689 rows and the import runs once per extract, so the simpler DOM API is
+      the right trade: a readable importer that HR Tech can follow beats a fast one.
+    -->
+    <dependency>
+      <groupId>org.apache.poi</groupId>
+      <artifactId>poi-ooxml</artifactId>
+      <version>5.4.1</version>
+    </dependency>
+
+    <!--
       Tickets, feedback and chat threads live in MongoDB Atlas.
 
       They are records, not vectors: HR reads them by id, filters them by status

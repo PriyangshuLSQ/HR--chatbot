@@ -24,9 +24,9 @@ import org.springframework.security.oauth2.core.oidc.user.OidcUser;
  */
 class CurrentUserTest {
 
-  private static final AuthProperties NO_ADMINS = new AuthProperties(true, "", "/chat");
+  private static final AuthProperties NO_ADMINS = new AuthProperties(true, false, "", "/chat");
   private static final AuthProperties WITH_ADMIN =
-      new AuthProperties(true, "boss@leadsquared.com , OTHER@leadsquared.com", "/chat");
+      new AuthProperties(true, false, "boss@leadsquared.com , OTHER@leadsquared.com", "/chat");
 
   /**
    * Built with no IAM service, because these cases pin the two rules that live
@@ -127,7 +127,7 @@ class CurrentUserTest {
    */
   @Test
   void guestFromAnotherTenantMatchesTheAddressAnAdminWouldWrite() {
-    AuthProperties props = new AuthProperties(true, "bnalamat@gitam.in", "/chat");
+    AuthProperties props = new AuthProperties(true, false, "bnalamat@gitam.in", "/chat");
 
     // Case 1: preferred_username is the #EXT# UPN.
     OidcUser asExtUpn =
@@ -147,7 +147,7 @@ class CurrentUserTest {
   void extUpnTranslationDoesNotOverreach() {
     // A member whose local part merely contains an underscore must not be rewritten
     // into some other address and accidentally match.
-    AuthProperties props = new AuthProperties(true, "first@last.com", "/chat");
+    AuthProperties props = new AuthProperties(true, false, "first@last.com", "/chat");
     OidcUser user = principal(idToken(Map.of("preferred_username", "first_last@leadsquared.com")));
 
     assertThat(resolverFor(props).from(user).role()).isEqualTo(SignedInUser.EMPLOYEE);
@@ -168,6 +168,6 @@ class CurrentUserTest {
     // no way to let them back in.
     assertThat(NO_ADMINS.shouldSecure(false)).isFalse();
     assertThat(NO_ADMINS.shouldSecure(true)).isTrue();
-    assertThat(new AuthProperties(false, "", "/chat").shouldSecure(true)).isFalse();
+    assertThat(new AuthProperties(false, false, "", "/chat").shouldSecure(true)).isFalse();
   }
 }

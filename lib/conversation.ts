@@ -40,16 +40,10 @@ import {
   type RouteTarget,
 } from './nlu';
 import type { FAQ } from './chatbot-data';
-import {
-  fetchLeaveBalances,
-  fetchLatestPayslip,
-  fetchRequests,
-  formatCurrency,
-  totalLeaveAvailable,
-  type LeaveBalance,
-  type PayslipSummary,
-  type TrackedRequest,
-} from './darwinbox';
+// Types only. The mock adapter's fetch* functions are no longer called from anywhere in the
+// answer path — see runAction below. `lib/darwinbox.ts` still exists because DataCards is
+// typed against these shapes; nothing serves data from it.
+import type { LeaveBalance, PayslipSummary, TrackedRequest } from './darwinbox';
 import { createTicket, type Ticket } from './hr-store';
 import { RELEVANCE_THRESHOLD, STRONG_RELEVANCE } from './knowledge/types';
 import type { AnswerMode, Citation, KnowledgeAnswer } from './knowledge/types';
@@ -142,83 +136,33 @@ const GREETING = /^(hi|hii|hello|hey|good morning|good afternoon|good evening|na
 const FOLLOWUP = /\b(what about|how about|and|also|mine|that|it|instead|too)\b/i;
 
 // ---------------------------------------------------------------------------
-// Darwinbox-backed answers
+// Employee data answers
 // ---------------------------------------------------------------------------
 
+/**
+ * Data-intent handler. Deliberately answers nothing.
+ *
+ * This used to serve leave balances, payslips and request statuses from
+ * `lib/darwinbox.ts` — a mock adapter returning realistic fixtures. That was fine while
+ * there was no data layer behind it, and actively dangerous once there was: an employee
+ * asking "how many casual leaves do I have left?" was told "5 available (of 12 entitled)"
+ * and "your live leave balance from Darwinbox", when the HR extract contains no casual
+ * leave and no comp-off at all. Confident, specific, and invented — the exact failure the
+ * grounding rules exist to prevent, and worse than any refusal because nothing signals it.
+ *
+ * Returning null lets every data question fall through to the backend, which resolves it
+ * against the authenticated employee's real record (and the policy documents) or says it
+ * cannot. Questions with no source in the extract — payslips, expense claims, asset
+ * requests — now route to HR Ops instead of being fabricated.
+ *
+ * The signature is kept so the dispatch above is unchanged, and so this comment sits where
+ * the next person looks for the mock.
+ */
 async function runAction(
-  action: IntentAction,
-  email: string | undefined
+  _action: IntentAction,
+  _email: string | undefined
 ): Promise<{ content: string; card?: CardPayload } | null> {
-  // Live data is per-employee, so it needs an authenticated session.
-  if (!email) {
-    return {
-      content:
-        "I can pull that straight from Darwinbox, but I need you to be signed in first so I only ever show you your own records.\n\nPlease sign in and ask me again.",
-    };
-  }
-
-  switch (action) {
-    case 'leave_balance': {
-      const balances = await fetchLeaveBalances(email);
-      const total = totalLeaveAvailable(balances);
-      const pending = balances.reduce((s, b) => s + b.pending, 0);
-      const lines = balances
-        .map((b) => `• **${b.type}** — ${b.available} available (of ${b.entitled} entitled)`)
-        .join('\n');
-      return {
-        content:
-          `Here's your live leave balance from Darwinbox — **${total} days available** in total.\n\n${lines}` +
-          (pending
-            ? `\n\n${pending} day(s) are attached to requests still awaiting approval, so they're not yet deducted.`
-            : ''),
-        card: { kind: 'leave_balance', balances },
-      };
-    }
-
-    case 'payslip_summary': {
-      const payslip = await fetchLatestPayslip(email);
-      return {
-        content:
-          `Your most recent payslip is for **${payslip.month}**, credited on ${new Date(
-            payslip.paidOn
-          ).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}.\n\n` +
-          `• **Gross:** ${formatCurrency(payslip.gross)}\n` +
-          `• **Net paid:** ${formatCurrency(payslip.net)}\n` +
-          `• **Tax deducted (TDS):** ${formatCurrency(
-            payslip.deductions.find((d) => d.label.includes('Tax'))?.amount ?? 0
-          )}\n\n` +
-          `Financial year to date: ${formatCurrency(payslip.ytdGross)} gross, ${formatCurrency(
-            payslip.ytdTax
-          )} tax. The full breakdown is below, and the PDF is in **Darwinbox → Payroll → Payslips**.`,
-        card: { kind: 'payslip', payslip },
-      };
-    }
-
-    case 'leave_status':
-    case 'expense_status':
-    case 'asset_status': {
-      const kind =
-        action === 'leave_status' ? 'leave' : action === 'expense_status' ? 'expense' : 'asset';
-      const requests = await fetchRequests(email, kind);
-      const heading =
-        kind === 'leave' ? 'Your leave requests' : kind === 'expense' ? 'Your expense claims' : 'Your asset requests';
-
-      if (!requests.length) {
-        return { content: `You don't have any ${kind} requests on record right now.` };
-      }
-
-      const open = requests.filter((r) => r.status === 'pending' || r.status === 'in-progress');
-      const summary = open.length
-        ? `You have **${open.length} ${kind} request${open.length > 1 ? 's' : ''} still in progress**:\n\n` +
-          open.map((r) => `• **${r.id}** — ${r.title}. ${r.lastUpdate}`).join('\n')
-        : `All your ${kind} requests are closed out. The most recent was **${requests[0].id}** — ${requests[0].lastUpdate}.`;
-
-      return { content: summary, card: { kind: 'requests', requests, heading } };
-    }
-
-    default:
-      return null;
-  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
