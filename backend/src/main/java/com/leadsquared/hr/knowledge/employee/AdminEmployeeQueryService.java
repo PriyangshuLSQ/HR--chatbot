@@ -139,6 +139,7 @@ public class AdminEmployeeQueryService {
         out.append("- Status: ").append(j.employmentStatus())
             .append(", joined: ").append(j.dateOfJoining()).append("\n");
         out.append("- Reporting manager: ").append(j.reportingManagerName()).append("\n");
+        out.append("- HRBP: ").append(j.hrbpName()).append("\n");
       }
       if (e.compensation() != null && e.compensation().fixedCtc() != null) {
         out.append("- Annual fixed CTC: ")

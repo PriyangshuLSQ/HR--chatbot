@@ -1,6 +1,8 @@
 package com.leadsquared.hr.knowledge.security;
 
+import com.leadsquared.hr.knowledge.audit.LoginTracker;
 import com.leadsquared.hr.knowledge.iam.IamService;
+import com.leadsquared.hr.knowledge.model.Permissions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -50,8 +52,23 @@ public class SecurityConfig {
    * signing in depend on already being signed in.
    */
   private static final String[] PUBLIC = {
-    "/oauth2/**", "/api/auth/callback/**", "/login/**", "/api/auth/me", "/api/auth/local", "/error"
+    "/oauth2/**",
+    "/api/auth/callback/**",
+    "/login/**",
+    "/api/auth/me",
+    "/api/auth/local",
+    // TEMPORARY, and public for the same reason the callback is: it is the request that
+    // establishes the session. It signs in as one configured address and 404s when that
+    // property is unset, which is its state everywhere but one laptop. See AuthProperties.
+    "/api/auth/dev",
+    "/error"
   };
+
+  /** Shorthand for the area gates below, so each rule reads as one line beside its URL. */
+  private static PermissionAccess area(
+      CurrentUser currentUser, PermissionChecker permissions, String permission) {
+    return PermissionAccess.requiring(currentUser, permissions, permission);
+  }
 
   @Bean
   SecurityFilterChain filterChain(
@@ -59,6 +76,9 @@ public class SecurityConfig {
       AuthProperties props,
       IamService iam,
       AdminConsoleAccess adminAccess,
+      CurrentUser currentUser,
+      PermissionChecker permissions,
+      LoginTracker logins,
       ObjectProvider<ClientRegistrationRepository> clients)
       throws Exception {
 
@@ -96,6 +116,27 @@ public class SecurityConfig {
       return http.build();
     }
 
+    // TEMPORARY, removed when the Entra registration is approved. The bypass leaves this chain
+    // fully in force — it substitutes only who asserts the identity — but a deployed profile must
+    // still never carry it, so the same switch that forbids running open forbids this too.
+    String devSignIn = props.devSignInEmail();
+    if (devSignIn != null) {
+      if (props.requireAuthentication()) {
+        throw new IllegalStateException(
+            "hr.auth.require=true with hr.auth.dev-sign-in-as="
+                + devSignIn
+                + ". Refusing to start: that property signs anyone who can reach /api/auth/dev in"
+                + " as that account without Microsoft. It is a local development stand-in for a"
+                + " pending Entra registration — unset it in any deployed profile.");
+      }
+      log.warn(
+          "TEMPORARY Entra bypass is ON: POST /api/auth/dev signs in as {} with no Microsoft"
+              + " sign-in. Authorization is otherwise unchanged — the session, the role rules and"
+              + " every endpoint's checks all still apply. Remove hr.auth.dev-sign-in-as once the"
+              + " app registration is approved.",
+          devSignIn);
+    }
+
     log.info(
         "Entra sign-in is ON. Admin accounts: {}",
         props.admins().isEmpty() ? "none configured (everyone is an employee)" : props.admins());
@@ -112,11 +153,34 @@ public class SecurityConfig {
                     // managed in the console now, and hasRole reads authorities
                     // frozen at sign-in — so a revoked admin would keep the console
                     // until they next signed out. See that class.
-                    .requestMatchers("/api/feedback/**").access(adminAccess)
-                    .requestMatchers("/api/knowledge/**").access(adminAccess)
-                    // Access management is itself admin-only, or the first employee
-                    // to find the endpoint grants themselves the console.
-                    .requestMatchers("/api/iam/**").access(adminAccess)
+                    // One area, one permission, each also requiring ADMIN_CONSOLE — see
+                    // PermissionAccess. The console used to be a single grant, so maintaining the
+                    // policy library and reading every harassment report were the same access.
+                    //
+                    // Path-level, which is what decides the granularity available here: these
+                    // are whole-endpoint grants, not read-versus-write. A finer split would have
+                    // to move to method-level checks on each controller.
+                    .requestMatchers("/api/feedback/**")
+                    .access(area(currentUser, permissions, Permissions.ADMIN_DIGEST))
+                    .requestMatchers("/api/knowledge/**")
+                    .access(area(currentUser, permissions, Permissions.ADMIN_KNOWLEDGE))
+                    // Access management gates itself, or the first employee to find the endpoint
+                    // grants themselves the console.
+                    .requestMatchers("/api/iam/**")
+                    .access(area(currentUser, permissions, Permissions.ADMIN_ACCESS))
+                    // The variable pay plan. Its own gate because entering a revenue figure moves
+                    // the computed payout for every non-sales employee at once.
+                    .requestMatchers("/api/payroll/**")
+                    .access(area(currentUser, permissions, Permissions.ADMIN_PAYROLL))
+                    // The audit trail and the sign-in list. Listed before the /api/** rule below,
+                    // because the first matching rule wins and a later, broader one would never
+                    // be consulted.
+                    .requestMatchers("/api/admin/**")
+                    .access(area(currentUser, permissions, Permissions.ADMIN_AUDIT))
+                    // Not listed: /api/tickets. Employees raise and read their own escalations
+                    // there, so it cannot be gated by path — TicketController decides per request
+                    // whether the caller sees the queue or only what they filed, and whether the
+                    // sensitive ones are among them.
                     .requestMatchers("/api/**").authenticated()
                     // Anything else belongs to the Next.js app, not this service.
                     .anyRequest().permitAll())
@@ -127,7 +191,8 @@ public class SecurityConfig {
                     // never sees the callback and Microsoft's code goes to a 404.
                     .redirectionEndpoint(redirection -> redirection.baseUri(CALLBACK_BASE_URI))
                     .userInfoEndpoint(
-                        userInfo -> userInfo.oidcUserService(new EntraOidcUserService(props, iam)))
+                        userInfo ->
+                            userInfo.oidcUserService(new EntraOidcUserService(props, iam, logins)))
                     .defaultSuccessUrl(props.resolvedSuccessPath(), true))
         .logout(
             logout ->

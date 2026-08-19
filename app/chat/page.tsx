@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { DEFAULT_FAQS, type FAQ } from '@/lib/chatbot-data';
 import { respond, type BotTurn, type ConversationContext } from '@/lib/conversation';
-import { CHANNELS, getChannel } from '@/lib/channel';
 import { useChatbotAuth } from '@/lib/chatbot-auth';
+import { useTheme, type Theme } from '@/lib/theme';
 import { fetchThreads, putThreads } from '@/lib/hr-api';
 import { isSoundOn, playNotification, setSoundOn } from '@/lib/sound';
 import { PoweredByLeadSquared, ROBIN_NAME, RobinAvatar } from '@/components/Robin';
@@ -148,11 +148,22 @@ function relativeDay(at: number): string {
  * falls back to its existing clarify/escalate behaviour — a slow or absent
  * model must never block an answer the curated intents could have given.
  */
+/**
+ * @param threadId which conversation this belongs to. Sent so the server can read the transcript
+ *     from its own copy instead of trusting the `history` below — see `AiController.historyFor`.
+ *     The history is still sent as a fallback for the first message of a thread, before the
+ *     server has one, and for a signed-out session.
+ */
 async function askKnowledge(
   question: string,
   history: { role: 'user' | 'bot'; text: string }[],
+  threadId: string | null,
   onToken?: (text: string) => void
 ): Promise<KnowledgeAnswer | null> {
+  // Was the last 6 messages. The server caps this itself, so sending the recent conversation
+  // rather than two exchanges is what lets the assistant follow a thread it has been part of.
+  const body = JSON.stringify({ question, history: history.slice(-40), threadId });
+
   // Without a token sink there is nothing streaming buys, and the plain endpoint
   // is one round trip instead of a parsed event stream.
   if (!onToken) {
@@ -160,7 +171,7 @@ async function askKnowledge(
       const res = await fetch('/api/ai/ask', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question, history: history.slice(-6) }),
+        body,
       });
       if (!res.ok) return null;
       return (await res.json()) as KnowledgeAnswer;
@@ -173,7 +184,7 @@ async function askKnowledge(
     const res = await fetch('/api/ai/ask/stream', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question, history: history.slice(-6) }),
+      body,
     });
     if (!res.ok || !res.body) return null;
 
@@ -264,8 +275,7 @@ export default function ChatPage() {
    */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [booted, setBooted] = useState(false);
-  const [theme, setTheme] = useState<'light' | 'dark' | null>(null);
-  const [channel, setChannel] = useState(CHANNELS[0]);
+  const { theme, toggleTheme } = useTheme();
   /** Read from localStorage on mount, not at init — the server has no window. */
   const [soundOn, setSoundOnState] = useState(true);
   const [faqs] = useState<FAQ[]>(DEFAULT_FAQS);
@@ -312,16 +322,12 @@ export default function ChatPage() {
   const active = threads.find((t) => t.id === activeId) ?? null;
   const messages = active?.messages ?? [];
 
-  // --- boot: restore threads, channel and theme ---------------------------
+  // --- boot: restore threads and preferences ---------------------------
   useEffect(() => {
-    setChannel(getChannel());
     setSoundOnState(isSoundOn());
     setSidebarCollapsed(localStorage.getItem('hr_sidebar') === 'collapsed');
-    const storedTheme = localStorage.getItem('hr_theme') as 'light' | 'dark' | null;
-    if (storedTheme) {
-      setTheme(storedTheme);
-      document.documentElement.setAttribute('data-theme', storedTheme);
-    }
+    // The theme is restored before paint by the bootstrap script in the root layout, and its
+    // state is owned by useTheme — nothing to do here.
 
     // Conversations come from MongoDB via the backend, so they survive a reload
     // and follow the employee to another device — localStorage did neither.
@@ -440,13 +446,6 @@ export default function ChatPage() {
     if (next) playNotification();
   };
 
-  const toggleTheme = () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('hr_theme', next);
-  };
-
   const startThread = () => {
     const t = freshThread();
     ctxRef.current = {};
@@ -499,9 +498,9 @@ export default function ChatPage() {
           faqs,
           email,
           userName,
-          channel: channel.label,
           transcript,
-          askKnowledge,
+          // Closed over the active thread so the server can prefer its own transcript.
+          askKnowledge: (q, hist, onToken) => askKnowledge(q, hist, activeId, onToken),
           // Streamed fragments land in their own state, not in the thread: the
           // turn is not a message yet — retrieval may still refuse, in which case
           // this text is discarded and the employee is offered a human instead.
@@ -577,7 +576,6 @@ export default function ChatPage() {
     },
     [
       activeId,
-      channel.label,
       faqs,
       messages,
       thinking,
@@ -640,7 +638,6 @@ export default function ChatPage() {
                 <BotBubble
                   key={m.id}
                   message={m}
-                  channel={channel.label}
                   onPick={send}
                   animate={m.id === animateId && !animatedRef.current.has(m.id)}
                   onTick={followText}
@@ -650,9 +647,9 @@ export default function ChatPage() {
             )}
 
             {/*
-              Once the first fragment lands, the answer replaces the thinking dots
-              and grows in place. The dots stay for retrieval and embedding, which
-              is genuine waiting with nothing to show yet.
+              Once the first fragment lands, the answer replaces the "Thinking" line and grows in
+              place. That line stays for retrieval and embedding, which is genuine waiting with
+              nothing to show yet.
             */}
             {thinking &&
               (streamText ? <StreamingBubble text={streamText} /> : <Thinking />)}
@@ -776,7 +773,11 @@ function Sidebar({
         <div style={{ marginTop: 'auto' }}>
           <button
             className="btn btn-ghost"
-            style={{ padding: '0.5rem' }}
+            // Red, because this is the one destructive control in the rail — the icons around it
+            // create things. `--error-ink` rather than `--error`: it is the foreground-tuned red,
+            // legible on both themes' surfaces where the raw token goes muddy in dark mode. The
+            // icon inherits it through currentColor.
+            style={{ padding: '0.5rem', color: 'var(--error-ink)' }}
             aria-label="Sign out"
             title="Sign out"
             onClick={() => {
@@ -935,7 +936,8 @@ function Sidebar({
           */}
           <button
             className="btn btn-ghost btn-sm"
-            style={{ padding: '0.3125rem' }}
+            // Same red as the collapsed rail's sign-out, so the control reads the same either way.
+            style={{ padding: '0.3125rem', color: 'var(--error-ink)' }}
             aria-label="Sign out"
             onClick={() => {
               void signOut().then(() => {
@@ -968,7 +970,7 @@ function Header({
 }: {
   onMenu: () => void;
   onToggleTheme: () => void;
-  theme: 'light' | 'dark' | null;
+  theme: Theme;
   soundOn: boolean;
   onToggleSound: () => void;
 }) {
@@ -993,22 +995,15 @@ function Header({
         <MenuIcon size={18} />
       </button>
 
+      {/*
+        The title and status line ("HR Support", "Available 24/7 · Darwinbox connected") are
+        gone from view — the sidebar already names the product and the status was decoration.
+        The heading stays for assistive tech, because the conversation view has no other one
+        once the greeting is replaced by messages, and the div stays as the flex spacer that
+        holds the buttons to the right.
+      */}
       <div style={{ minWidth: 0, flex: 1 }}>
-        <h1 style={{ fontSize: '0.9375rem', fontWeight: 700, lineHeight: 1.25 }}>
-          HR Support
-        </h1>
-        <p
-          style={{
-            fontSize: '0.75rem',
-            color: 'var(--muted-foreground)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.375rem',
-          }}
-        >
-          <span className="live-dot" />
-          Available 24/7 · Darwinbox connected
-        </p>
+        <h1 className="sr-only">HR Support</h1>
       </div>
 
       <button
@@ -1078,14 +1073,12 @@ function UserBubble({ message }: { message: ChatMessage }) {
 
 function BotBubble({
   message,
-  channel,
   onPick,
   animate = false,
   onTick,
   onAnimated,
 }: {
   message: ChatMessage;
-  channel: string;
   onPick: (text: string) => void;
   /**
    * Type this answer out. Set for exactly one message — the one that just arrived
@@ -1131,6 +1124,27 @@ function BotBubble({
       )}
 
       <div style={{ minWidth: 0, flex: 1 }}>
+        {/*
+          The name, once per turn. The avatar alone identified the speaker by picture; in a
+          transcript people read rather than look at, an unlabelled bubble is just "the other
+          one". Sits outside the bubble so it reads as a byline rather than as part of the
+          answer, and is not repeated inside the text where it would compete with the content.
+        */}
+        <p
+          style={{
+            // Not `label-caps`: that class forces text-transform: uppercase, which rendered a
+            // name as ROBIN. A name is a name — shouting it makes it read as a system label
+            // rather than as whoever is talking. Same size and colour, sentence case, and no
+            // wide tracking, which only earns its place on actual all-caps labels.
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            color: 'var(--muted-foreground)',
+            marginBottom: '0.3125rem',
+          }}
+        >
+          Robin
+        </p>
+
         <div
           style={{
             padding: '0.8125rem 1rem',
@@ -1165,8 +1179,11 @@ function BotBubble({
           {turn?.corrections && turn.corrections.length > 0 && (
             <p style={{ fontSize: '0.6875rem', color: 'var(--faint)', marginTop: '0.5rem' }}>
               Read as:{' '}
+              {/* Keyed by position, not by `from`: the same word can be corrected twice in one
+                  message, and a long paste corrects plenty of them. React warns about the
+                  duplicate and may drop or duplicate a child. */}
               {turn.corrections.map((c, i) => (
-                <span key={c.from}>
+                <span key={`${i}-${c.from}`}>
                   {i > 0 && ', '}
                   <s>{c.from}</s> → <strong>{c.to}</strong>
                 </span>
@@ -1175,11 +1192,7 @@ function BotBubble({
           )}
 
           {turn?.citations && turn.citations.length > 0 && (
-            <Citations
-              citations={turn.citations}
-              mode={turn.aiMode}
-              model={turn.aiModel}
-            />
+            <Citations citations={turn.citations} />
           )}
 
           {turn?.card?.kind === 'leave_balance' && (
@@ -1250,7 +1263,6 @@ function BotBubble({
               intentId={turn.intentId}
               intentLabel={turn.intentLabel}
               confidence={turn.confidence}
-              channel={channel}
             />
           )}
         </div>
@@ -1260,26 +1272,20 @@ function BotBubble({
 }
 
 /**
- * Source passages behind a document-backed answer.
+ * The passages behind an answer, with no attribution line above them.
  *
- * Always shown, never collapsed away entirely: an AI-written answer about
- * someone's leave entitlement is only trustworthy if the employee can see the
- * policy text it came from and check it themselves.
+ * There used to be one — "Written from your HR documents by claude-haiku-4-5" — naming both
+ * the source and the model. Both are gone deliberately: how the answer was produced is an
+ * implementation detail an employee has no use for, and naming the model invites questions
+ * about the machine instead of about their leave.
+ *
+ * The passages themselves stay. HR Ops' own Phase 1 requirement is that the assistant cites
+ * the policy section it draws from — for insurance questions especially, where an employee
+ * acting on a coverage answer needs to be able to check it. Removing the sentence hides how
+ * the answer was made; removing these would hide what it was based on, which is a different
+ * and much more consequential thing.
  */
-function Citations({
-  citations,
-  mode,
-  model,
-}: {
-  citations: Citation[];
-  mode?: string;
-  model?: string;
-}) {
-  const label =
-    mode === 'generated'
-      ? `Written from your HR documents${model ? ` by ${model}` : ''}`
-      : 'Quoted directly from your HR documents';
-
+function Citations({ citations }: { citations: Citation[] }) {
   return (
     <div
       style={{
@@ -1288,13 +1294,6 @@ function Citations({
         borderTop: '1px solid var(--border)',
       }}
     >
-      <p
-        className="label-caps"
-        style={{ color: 'var(--muted-foreground)', marginBottom: '0.5rem' }}
-      >
-        {label}
-      </p>
-
       <div style={{ display: 'grid', gap: '0.375rem' }}>
         {citations.slice(0, 3).map((c, i) => (
           <details
@@ -1348,35 +1347,20 @@ function Citations({
  * flickering as tokens land — which reads worse than watching plain prose appear.
  * The formatted version replaces this the moment the turn completes.
  */
-/** The three bouncing dots, on their own so both waiting states share one. */
-/** An equaliser, for the phase where nothing can be shown yet. */
-function WaveBars() {
-  return (
-    <span className="wave-bars" aria-hidden>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <span key={i} className="wave-bar" style={{ animationDelay: `${i * 0.11}s` }} />
-      ))}
-    </span>
-  );
-}
-
 /**
  * What Robin is doing right now, above the bubble.
  *
- * <p>The two phases are genuinely different and are shown differently. While
- * retrieval, embedding and prompt evaluation run — measured at eight of the eleven
- * seconds a real answer took here — there is nothing to say, so nothing is said: a
- * moving level stands in for work happening. Once words are arriving there is
- * something to name, so it is named, once, in one word.
+ * <p>One word per phase, both swept by the same shimmer: <b>Thinking</b> while retrieval,
+ * embedding and prompt evaluation run — measured at eight of the eleven seconds a real answer
+ * took here — then <b>Writing</b> once words are arriving.
  *
- * <p>No wording for the waiting phase on purpose. A sentence describing internals
- * ("reading your HR documents") is a claim about what the machine is doing, sitting
- * on screen for nine seconds, competing with the answer for attention — and it has
- * to be re-read every time to learn nothing new.
+ * <p>The waiting phase used to be a moving equaliser with no wording, on the argument that
+ * naming internals tells the employee nothing. Named now because the two phases read as one
+ * continuous state when they share a treatment, and "Thinking" is the honest word for a wait
+ * that is mostly retrieval — it describes the shape of what is happening without claiming to
+ * describe the mechanism.
  */
 function ActivityLabel({ state }: { state: 'waiting' | 'writing' }) {
-  if (state === 'waiting') return <WaveBars />;
-
   return (
     <span
       style={{
@@ -1388,7 +1372,7 @@ function ActivityLabel({ state }: { state: 'waiting' | 'writing' }) {
       }}
       role="status"
     >
-      <span className="activity-shimmer">Writing</span>
+      <span className="activity-shimmer">{state === 'waiting' ? 'Thinking' : 'Writing'}</span>
     </span>
   );
 }

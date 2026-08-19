@@ -422,10 +422,11 @@ export function TicketCard({ ticket }: { ticket: Ticket }) {
           <span style={{ color: 'var(--muted-foreground)', minWidth: 74 }}>Routed to</span>
           <span>{ROUTE_LABELS[ticket.route]}</span>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.8125rem' }}>
-          <span style={{ color: 'var(--muted-foreground)', minWidth: 74 }}>Channel</span>
-          <span>{ticket.channel}</span>
-        </div>
+        {/*
+          No "Channel" row. Which surface the employee happened to raise this from tells them
+          nothing they do not already know — they are looking at it. The field is still stamped on
+          the ticket for HR's own analytics; it is just not something to show back to them.
+        */}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.375rem', marginTop: '0.125rem' }}>
           {ticket.tags.map((tag) => (

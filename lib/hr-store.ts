@@ -52,7 +52,6 @@ export interface Ticket {
   /** Preceding turns, so HR has the thread rather than one orphaned line. */
   transcript: { role: 'user' | 'bot'; text: string }[];
   confidential: boolean;
-  channel: string;
   /**
    * The thread between HR and the employee, oldest first. Optional because tickets
    * written before threads existed have no field at all.
@@ -85,7 +84,6 @@ export interface Feedback {
   query: string;
   confidence: number;
   createdAt: string;
-  channel: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +191,6 @@ export interface CreateTicketInput {
   tags: string[];
   confidence: number;
   transcript: { role: 'user' | 'bot'; text: string }[];
-  channel: string;
 }
 
 /**
@@ -219,7 +216,6 @@ export async function createTicket(input: CreateTicketInput): Promise<Ticket> {
     tags: Array.from(new Set(input.tags)),
     confidence: input.confidence,
     transcript: input.transcript.slice(-6),
-    channel: input.channel,
   });
 
   ticketCache = [stored, ...ticketCache.filter((t) => t.id !== stored.id)];
@@ -267,7 +263,6 @@ export interface RecordFeedbackInput {
   intentLabel?: string;
   query: string;
   confidence: number;
-  channel: string;
 }
 
 /**

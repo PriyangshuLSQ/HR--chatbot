@@ -83,7 +83,16 @@ public record KnowledgeProperties(
    *     {@code claude-opus-5} / {@code claude-sonnet-5} — on a dense scan that is the
    *     difference between small print being legible and being guessed at.
    * @param maxImagesPerDocument hard cap per upload. A 200-slide deck exported to .docx
-   *     would otherwise mean 200 vision calls in one HTTP request.
+   *     would otherwise mean 200 vision calls in one HTTP request. Raised from 12 to 100: at 12
+   *     a scan of more than a dozen pages indexed its first twelve and reported the rest as
+   *     skipped, so the document appeared to upload cleanly while most of it was missing from
+   *     the knowledge base. The cap still exists because ingestion is synchronous — see {@code
+   *     OCR_CONCURRENCY} in ClaudeVisionClient for what keeps a long document failing slowly
+   *     rather than failing.
+   *     <p>At 100 the arithmetic is roughly 13 waves of 8, so about a minute of OCR and around
+   *     60 cents on claude-haiku-4-5. Both sit inside the 5-minute proxy timeout the console
+   *     uploads through. Note the 15 MB per-file limit usually binds first on scans — 100 pages
+   *     fit only at about 150 KB a page.
    * @param minImageBytes images smaller than this are skipped unread. Logos, bullet
    *     glyphs and signature squiggles are the overwhelming majority of images in a
    *     policy document and none of them carry text worth indexing; paying to discover
@@ -94,7 +103,7 @@ public record KnowledgeProperties(
   public record Ocr(
       @DefaultValue("true") boolean enabled,
       @DefaultValue("claude-haiku-4-5") String model,
-      @DefaultValue("12") int maxImagesPerDocument,
+      @DefaultValue("100") int maxImagesPerDocument,
       @DefaultValue("6144") int minImageBytes,
       @DefaultValue("1500") int maxAnswerTokens) {}
 

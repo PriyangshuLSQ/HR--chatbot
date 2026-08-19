@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.leadsquared.hr.knowledge.model.Employee;
 import com.leadsquared.hr.knowledge.store.EmployeeRepository;
+import com.leadsquared.hr.knowledge.store.EnpsResponseRepository;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import java.io.File;
 import java.math.BigDecimal;
@@ -47,7 +48,7 @@ class EmployeeImportServiceTest {
     EmployeeRepository repo = mock(EmployeeRepository.class);
     when(repo.count()).thenReturn(0L);
 
-    EmployeeImportService service = new EmployeeImportService(repo, mock(MongoTemplate.class));
+    EmployeeImportService service = new EmployeeImportService(repo, mock(EnpsResponseRepository.class), mock(MongoTemplate.class));
     var report = service.importFrom(EXTRACT_DIR, "lsq.com", "leadsquared.com", overrides);
 
     assertThat(report.imported()).isEqualTo(5000);
@@ -145,7 +146,7 @@ class EmployeeImportServiceTest {
 
     EmployeeRepository repo = mock(EmployeeRepository.class);
     var report =
-        new EmployeeImportService(repo, mock(MongoTemplate.class))
+        new EmployeeImportService(repo, mock(EnpsResponseRepository.class), mock(MongoTemplate.class))
             .importFrom(EXTRACT_DIR, "lsq.com", "leadsquared.com", Map.of("x@y.com", "LS99999"));
 
     assertThat(report.warnings())

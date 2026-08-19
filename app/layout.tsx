@@ -2,6 +2,7 @@ import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { Figtree, JetBrains_Mono } from 'next/font/google'
 import { ChatbotAuthProvider } from '@/lib/chatbot-auth'
+import { THEME_BOOTSTRAP } from '@/lib/theme'
 import './globals.css'
 
 /*
@@ -78,7 +79,23 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+    <html
+      lang="en"
+      className={`${sans.variable} ${mono.variable}`}
+      suppressHydrationWarning
+    >
+      <head>
+        {/*
+          Runs before the first paint, so every page opens in the theme the employee chose —
+          including the ones with no toggle of their own. Each page used to restore this in its
+          own effect, which meant a frame of the wrong theme on the pages that remembered and
+          permanently the wrong theme on /tickets, which did not.
+
+          suppressHydrationWarning because this script mutates <html> before React hydrates, so
+          the server-rendered attributes and the live DOM legitimately differ.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} suppressHydrationWarning />
+      </head>
       <body className="antialiased">
         <ChatbotAuthProvider>
           {children}

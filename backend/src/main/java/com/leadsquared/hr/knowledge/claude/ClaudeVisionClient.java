@@ -10,13 +10,27 @@ import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.TextBlockParam;
 import com.leadsquared.hr.knowledge.config.KnowledgeProperties;
 import com.leadsquared.hr.knowledge.parse.ImageTextExtractor;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.List;
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +65,50 @@ public class ClaudeVisionClient implements ImageTextExtractor {
   private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
 
   private static final int MAX_RETRIES = 2;
+
+  /**
+   * Our ceiling on one image, well under the API's own 10 MB.
+   *
+   * <p>Lower for two reasons. The payload is base64, which is a third larger than the bytes
+   * counted here, and the API rejects the encoded size — so a 9 MB image fails a 10 MB limit.
+   * And a rejection is expensive in the wrong way: the 400 arrives after the upload has been
+   * held open, and {@code PdfParser} re-encodes scans losslessly, so a six-page scanned policy
+   * produced six 13-16 MB PNGs and six failures, then reported "no text could be extracted"
+   * about a document whose every page was legible.
+   */
+  private static final int MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+  /**
+   * Longest edge sent, in pixels.
+   *
+   * <p>Not a quality decision — the models downsample past this themselves (1568 on
+   * claude-haiku-4-5, 2576 on opus and sonnet), so anything larger is bytes spent to be thrown
+   * away at the far end. Set to the largest any current model uses, so switching {@code
+   * knowledge.ocr.model} up to opus for dense scans loses nothing.
+   */
+  private static final int MAX_EDGE_PX = 2576;
+
+  /** Below this the page is no longer worth transcribing, so shrinking further is pointless. */
+  private static final int MIN_EDGE_PX = 800;
+
+  /** Tried in order. 0.85 is visually lossless on text; 0.55 is the last resort before scaling. */
+  private static final float[] JPEG_QUALITIES = {0.85f, 0.7f, 0.55f};
+
+  /**
+   * How many transcriptions may be in flight at once.
+   *
+   * <p>Every image used to be submitted immediately, which was harmless while the per-document
+   * cap was 12 and stops being harmless as it rises: sixty simultaneous requests draw rate-limit
+   * responses, and a rate-limited page is retried twice and then reported as "could not be read".
+   * That is a worse failure than the cap it replaced — a skipped page is deterministic and
+   * flagged, whereas this varies run to run and looks like a bad scan.
+   *
+   * <p>Eight is chosen to keep the wall clock roughly proportional rather than minimal: a
+   * sixty-page policy is around eight waves of a few seconds, so under a minute, and a large
+   * document degrades in speed rather than in completeness. Not configurable on purpose — it is
+   * a property of the API's limits, not of this deployment.
+   */
+  private static final int OCR_CONCURRENCY = 8;
 
   /**
    * The sentinel for "no text here".
@@ -100,7 +158,10 @@ public class ClaudeVisionClient implements ImageTextExtractor {
 
     this.model = cfg == null ? "claude-haiku-4-5" : cfg.model();
     this.maxAnswerTokens = cfg == null ? 1500 : cfg.maxAnswerTokens();
-    this.maxImages = cfg == null ? 12 : cfg.maxImagesPerDocument();
+    // Kept in step with KnowledgeProperties.Ocr's own default. It only applies when no config is
+    // bound at all, but a stale number here would silently cap a document at a limit no
+    // configuration file mentions, which is a bad thing to debug.
+    this.maxImages = cfg == null ? 100 : cfg.maxImagesPerDocument();
     this.minImageBytes = cfg == null ? 6144 : cfg.minImageBytes();
     boolean wanted = cfg == null || cfg.enabled();
 
@@ -158,11 +219,18 @@ public class ClaudeVisionClient implements ImageTextExtractor {
           image.bytes().length >= minImageBytes
               && mediaTypeFor(image.mediaType()) != null
               && worthReading.size() < maxImages;
-      if (readable) {
-        worthReading.add(image);
-      } else {
+      if (!readable) {
         skipped++;
+        continue;
       }
+      // Shrunk here rather than at the parser, so every source — PDF pages, .docx embeds —
+      // is covered by one rule, and the rule lives with the client that knows the API's limit.
+      Image fitted = fit(image);
+      if (fitted == null) {
+        skipped++;
+        continue;
+      }
+      worthReading.add(fitted);
     }
     if (worthReading.isEmpty()) return new Extraction(List.of(), 0, 0, skipped, 0);
 
@@ -171,10 +239,25 @@ public class ClaudeVisionClient implements ImageTextExtractor {
     int failed = 0;
     int withoutText = 0;
 
+    // Still one virtual thread per image — they are nearly free, and the point of the semaphore
+    // is not to limit threads but to limit requests in flight at the API. Acquired inside the
+    // task rather than before submitting, so the submitting thread never blocks and the results
+    // are still collected in document order below.
+    Semaphore inFlight = new Semaphore(OCR_CONCURRENCY);
+
     try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
       List<Future<String>> futures = new ArrayList<>(worthReading.size());
       for (Image image : worthReading) {
-        futures.add(executor.submit(() -> transcribe(image)));
+        futures.add(
+            executor.submit(
+                () -> {
+                  inFlight.acquire();
+                  try {
+                    return transcribe(image);
+                  } finally {
+                    inFlight.release();
+                  }
+                }));
       }
 
       for (int i = 0; i < futures.size(); i++) {
@@ -251,6 +334,155 @@ public class ClaudeVisionClient implements ImageTextExtractor {
     // "NO_TEXT" as a passage is worse than one indexed with nothing.
     if (trimmed.isEmpty() || trimmed.contains(NO_TEXT)) return null;
     return trimmed;
+  }
+
+  /**
+   * Brings an image under {@link #MAX_IMAGE_BYTES}, or returns null if it cannot.
+   *
+   * <p>Untouched when it already fits, which is the common case — logos, diagrams and anything
+   * from a text-based document. Only scans reach the re-encoding path.
+   *
+   * <p>Re-encoded as JPEG rather than PNG: the input is a photograph of a page, which is exactly
+   * what lossless compression is worst at. The same scan that was a 16 MB PNG is a few hundred
+   * kilobytes of JPEG at a quality no OCR model can tell apart from the original.
+   *
+   * <p>Quality is stepped down before dimensions are, because sharp edges at full size read
+   * better than a clean render of smaller type — and text is what this is for.
+   */
+  private static Image fit(Image image) {
+    // Bytes are not the only ceiling, and assuming they were left a page failing after the rest
+    // were fixed: a well-compressed 8269x11694 scan came in under 4 MB and was rejected with
+    // "at least one of the image dimensions exceed max allowed size: 8000 pixels". Either test
+    // failing is enough to re-encode.
+    int[] size = dimensions(image.bytes());
+    boolean tooLarge = size != null && Math.max(size[0], size[1]) > MAX_EDGE_PX;
+    if (image.bytes().length <= MAX_IMAGE_BYTES && !tooLarge) return image;
+
+    BufferedImage source;
+    try {
+      source = ImageIO.read(new ByteArrayInputStream(image.bytes()));
+    } catch (IOException | RuntimeException e) {
+      source = null;
+    }
+    if (source == null) {
+      // No decoder, so no way to shrink it. Skipping beats sending it to a certain 400 after
+      // holding the upload open for the round trip.
+      log.warn(
+          "Cannot resize {} ({}) for OCR — no decoder for {}; skipping",
+          image.label(),
+          formatBytes(image.bytes().length),
+          image.mediaType());
+      return null;
+    }
+
+    int edge = Math.min(Math.max(source.getWidth(), source.getHeight()), MAX_EDGE_PX);
+    while (true) {
+      BufferedImage scaled = scaleToLongEdge(source, edge);
+      for (float quality : JPEG_QUALITIES) {
+        byte[] jpeg = toJpeg(scaled, quality);
+        if (jpeg != null && jpeg.length <= MAX_IMAGE_BYTES) {
+          log.info(
+              "Resized {} for OCR: {} {}x{} -> {} {}x{} jpeg q{}",
+              image.label(),
+              formatBytes(image.bytes().length),
+              source.getWidth(),
+              source.getHeight(),
+              formatBytes(jpeg.length),
+              scaled.getWidth(),
+              scaled.getHeight(),
+              quality);
+          return new Image(jpeg, "image/jpeg", image.label());
+        }
+      }
+      if (edge <= MIN_EDGE_PX) {
+        log.warn(
+            "Could not bring {} under {} even at {}px — skipping",
+            image.label(),
+            formatBytes(MAX_IMAGE_BYTES),
+            MIN_EDGE_PX);
+        return null;
+      }
+      edge = Math.max(MIN_EDGE_PX, edge * 2 / 3);
+    }
+  }
+
+  /**
+   * Width and height from the file header, without decoding the pixels.
+   *
+   * <p>Header-only because this runs on every image including the logos and bullet glyphs that
+   * make up most of a policy document, and decoding a few hundred of those to learn they were
+   * already small is work with no result.
+   *
+   * @return {@code {width, height}}, or null if no reader recognises the format
+   */
+  private static int[] dimensions(byte[] bytes) {
+    try (var stream = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes))) {
+      if (stream == null) return null;
+      Iterator<javax.imageio.ImageReader> readers = ImageIO.getImageReaders(stream);
+      if (!readers.hasNext()) return null;
+
+      javax.imageio.ImageReader reader = readers.next();
+      try {
+        reader.setInput(stream);
+        return new int[] {reader.getWidth(0), reader.getHeight(0)};
+      } finally {
+        reader.dispose();
+      }
+    } catch (IOException | RuntimeException e) {
+      return null;
+    }
+  }
+
+  private static BufferedImage scaleToLongEdge(BufferedImage source, int edge) {
+    int longest = Math.max(source.getWidth(), source.getHeight());
+    double factor = (double) edge / longest;
+    int width = Math.max(1, (int) Math.round(source.getWidth() * factor));
+    int height = Math.max(1, (int) Math.round(source.getHeight() * factor));
+
+    // TYPE_INT_RGB, and the white fill under it, because JPEG has no alpha: a transparent
+    // scan drawn straight onto the default buffer comes out black on black.
+    BufferedImage target = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+    Graphics2D g = target.createGraphics();
+    try {
+      g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+      g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+      g.setColor(Color.WHITE);
+      g.fillRect(0, 0, width, height);
+      g.drawImage(source, 0, 0, width, height, null);
+    } finally {
+      g.dispose();
+    }
+    return target;
+  }
+
+  /** @return the encoded bytes, or null when no JPEG writer is available */
+  private static byte[] toJpeg(BufferedImage image, float quality) {
+    Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
+    if (!writers.hasNext()) return null;
+
+    ImageWriter writer = writers.next();
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    try (ImageOutputStream out = ImageIO.createImageOutputStream(buffer)) {
+      ImageWriteParam params = writer.getDefaultWriteParam();
+      if (params.canWriteCompressed()) {
+        params.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+        params.setCompressionQuality(quality);
+      }
+      writer.setOutput(out);
+      writer.write(null, new IIOImage(image, null, null), params);
+    } catch (IOException | RuntimeException e) {
+      log.debug("JPEG encode failed at quality {}: {}", quality, e.toString());
+      return null;
+    } finally {
+      writer.dispose();
+    }
+    return buffer.toByteArray();
+  }
+
+  private static String formatBytes(long bytes) {
+    return bytes < 1024 * 1024
+        ? Math.round(bytes / 1024.0) + " KB"
+        : String.format(java.util.Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
   }
 
   /** Concatenates the text blocks, ignoring thinking and anything else non-visible. */

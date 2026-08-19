@@ -41,8 +41,7 @@ public class TicketService {
       boolean sensitive,
       List<String> tags,
       double confidence,
-      List<TranscriptTurn> transcript,
-      String channel) {}
+      List<TranscriptTurn> transcript) {}
 
   public List<Ticket> list() {
     return tickets.findAllByOrderByCreatedAtDesc();
@@ -95,7 +94,6 @@ public class TicketService {
             input.confidence(),
             transcript,
             routing.confidential(),
-            input.channel() == null ? "HR Portal" : input.channel(),
             List.of());
 
     return tickets.save(ticket);

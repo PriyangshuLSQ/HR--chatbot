@@ -55,8 +55,25 @@ public class Retriever {
   private static final double DENSE_WEIGHT = 0.62;
   private static final double LEXICAL_WEIGHT = 0.38;
 
-  /** Never return more than this many chunks from one document. */
-  private static final int MAX_PER_DOC = 3;
+  /**
+   * Share of the result set any one document may fill.
+   *
+   * <p>A proportion rather than a count, because the two numbers are coupled and a fixed cap
+   * silently changes meaning when {@code topK} moves. It was 3 against a {@code topK} of 5 — 60%
+   * — and raising {@code topK} to 8 turned the same 3 into 37%, handing the new slots to
+   * documents that merely shared a word with the question instead of to the policy being asked
+   * about. This keeps the original 60% at any {@code topK}, and reproduces the old cap of 3
+   * exactly where {@code topK} is still 5.
+   *
+   * <p>Why a cap at all: one document must not swamp a broad question ("what benefits do I get").
+   * Why not a tight one: a policy question is usually answered entirely inside a single policy,
+   * and the chunk holding the answer is often not that document's best match. "Car lease
+   * entitlement at grade X7" ranked the grade table fourth within its own document, behind three
+   * paragraphs that discuss entitlement without stating a figure — so at three-per-document the
+   * table was unreachable at any {@code topK}, and the employee was told the corpus did not cover
+   * a number sitting in it.
+   */
+  private static final double MAX_PER_DOC_SHARE = 0.6;
 
   /** Scores below this are noise and never reach the ranking. */
   private static final double SCORE_FLOOR = 0.02;
@@ -203,13 +220,30 @@ public class Retriever {
   private static List<RetrievedChunk> diversify(List<RetrievedChunk> sorted, int topK) {
     Map<String, Integer> perDoc = new HashMap<>();
     List<RetrievedChunk> out = new ArrayList<>(topK);
+    Set<String> taken = new HashSet<>();
+    int maxPerDoc = Math.max(1, (int) Math.ceil(topK * MAX_PER_DOC_SHARE));
 
     for (RetrievedChunk hit : sorted) {
       if (out.size() >= topK) break;
       int used = perDoc.getOrDefault(hit.chunk().docId(), 0);
-      if (used >= MAX_PER_DOC) continue;
+      if (used >= maxPerDoc) continue;
       perDoc.put(hit.chunk().docId(), used + 1);
+      taken.add(hit.chunk().id());
       out.add(hit);
+    }
+
+    // Rather than return fewer passages than asked for. The cap is there to keep one document
+    // from crowding out others that have something to say; where no other document does, an
+    // empty slot helps nobody and the next-best passage from the same policy is the best thing
+    // available. Only reached when the corpus genuinely has nothing else above the score floor.
+    //
+    // Membership by chunk id, not by RetrievedChunk: the record holds a KnowledgeChunk carrying
+    // its 768-float embedding, so record equality walks the whole vector on every comparison.
+    if (out.size() < topK) {
+      for (RetrievedChunk hit : sorted) {
+        if (out.size() >= topK) break;
+        if (taken.add(hit.chunk().id())) out.add(hit);
+      }
     }
     return out;
   }

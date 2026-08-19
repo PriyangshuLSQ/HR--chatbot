@@ -1,26 +1,27 @@
 /**
- * Robin's face, and the LeadSquared attribution.
+ * Robin's mark, and the LeadSquared attribution.
  *
- * One place, because the avatar appears on every bot message, in three headers
- * and on the sign-in page — and because the crop needs thinking about exactly
- * once. `robin.png` is a 1024×1536 portrait, so a square avatar has to discard a
- * third of it; `object-position: top` keeps the head rather than centring on the
- * middle of the body.
+ * One place, because the avatar appears on every bot message, in three headers and on the
+ * sign-in page.
+ *
+ * `robin.png` is now a 1254×1254 square app icon — a bird on a rounded-square gradient. The
+ * previous artwork was a 1024×1536 portrait, which is why this file used to crop to the top
+ * third: a square avatar had to discard the body. A square source needs no crop at all, so that
+ * is gone.
  */
 
 export const ROBIN_NAME = 'Robin';
 
 /**
- * One 160px derivative, generated from the original with `sips` (22 KB against
- * the source's 2.5 MB).
+ * One 160px derivative, generated from the original with
+ * `sips -Z 160 robin.png --out robin-160.png` (24 KB against the source's 800 KB).
  *
- * The original is fine as an asset and wasteful as an avatar: it is 1024×1536 and
- * `next.config.mjs` sets `images.unoptimized`, so nothing downsizes it at build
- * time — every chat page load would fetch 2.5 MB to draw a 30px circle.
+ * The original is fine as an asset and wasteful as an avatar: `next.config.mjs` sets
+ * `images.unoptimized`, so nothing downsizes it at build time — every chat page load would fetch
+ * the full file to draw a 30px badge.
  *
- * 160px covers every use here with room for high-density screens: 30px avatars at
- * 5x, the 44px sign-in badge at 3.6x. A second larger file was generated first and
- * deleted — nothing rendered big enough to reach for it.
+ * 160px covers every use here with room for high-density screens: 30px avatars at 5x, the 44px
+ * sign-in badge at 3.6x.
  */
 const SRC = '/robin-160.png';
 
@@ -51,9 +52,12 @@ export function RobinAvatar({
         width: size,
         height: size,
         flexShrink: 0,
+        // Square source into a square box, so `cover` scales without cropping and there is no
+        // object-position to choose. The old top-crop was there for a portrait.
         objectFit: 'cover',
-        objectPosition: 'top',
         borderRadius: rounded === 'full' ? '50%' : Math.max(6, Math.round(size * 0.28)),
+        // Shows only in the corners a circular mask leaves, and behind the icon's own transparent
+        // margin — the artwork carries its own gradient.
         background: 'var(--primary-soft)',
         boxShadow: ring ? '0 0 0 1px var(--border)' : undefined,
       }}

@@ -6,6 +6,7 @@ import com.leadsquared.hr.knowledge.model.SourceKind;
 import com.leadsquared.hr.knowledge.model.StoreStats;
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -134,10 +135,18 @@ public class KnowledgeStore {
     List<KnowledgeDoc> docs = qdrant.loadDocs();
     List<QdrantStore.LoadedChunk> loaded = qdrant.loadChunks();
 
+    // The title is attached here rather than stored on the chunk in Qdrant, because it is
+    // already stored — on the document — and duplicating it would let a renamed document keep an
+    // old name in its own passages. It matters because it joins the text each chunk is embedded
+    // and keyword-scored over: a PDF loses its headings, so without this a passage carries no
+    // trace of which policy it came from. See KnowledgeChunk.docTitle.
+    Map<String, String> titles = new HashMap<>();
+    for (KnowledgeDoc doc : docs) titles.put(doc.id(), doc.title());
+
     List<KnowledgeChunk> chunks = new ArrayList<>(loaded.size());
     Set<String> embedded = new HashSet<>();
     for (QdrantStore.LoadedChunk entry : loaded) {
-      chunks.add(entry.chunk());
+      chunks.add(entry.chunk().withDocTitle(titles.get(entry.chunk().docId())));
       if (entry.embedded()) embedded.add(entry.chunk().id());
     }
 

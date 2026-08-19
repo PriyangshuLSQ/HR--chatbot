@@ -57,6 +57,7 @@ public final class EmployeeFacts {
       line(out, "Employment status", job.employmentStatus());
       line(out, "Reporting manager", job.reportingManagerName());
       line(out, "L2 manager", job.l2ManagerName());
+      line(out, "HRBP", job.hrbpName());
       line(out, "Date of joining", job.dateOfJoining());
       line(out, "Probation end date", job.probationEndDate());
       line(out, "Confirmation date", job.confirmationDate());
@@ -71,7 +72,12 @@ public final class EmployeeFacts {
       if (fields.contains(PersonalDataIntent.COMPENSATION)) {
         out.append("\nCompensation:\n");
         money(out, "Fixed CTC (annual)", pay.fixedCtc(), unit);
-        money(out, "Monthly fixed gross", pay.monthlyFixedGross(), unit);
+        // Named precisely, and the deduction note spelled out, because the two differ by the
+        // employee's own PF and professional tax and they will compare whichever one they are
+        // given against their payslip.
+        money(out, "Monthly gross (before employee deductions)", pay.monthlyGross(), unit);
+        money(out, "Monthly in-hand estimate (after employee PF and professional tax)",
+            pay.monthlyInHand(), unit);
       }
       if (fields.contains(PersonalDataIntent.VARIABLE_PAY)) {
         out.append("\nVariable pay:\n");

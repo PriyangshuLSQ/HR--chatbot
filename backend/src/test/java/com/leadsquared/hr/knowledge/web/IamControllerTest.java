@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.leadsquared.hr.knowledge.audit.AdminAuditService;
 import com.leadsquared.hr.knowledge.iam.IamService;
 import com.leadsquared.hr.knowledge.security.CurrentUser;
 import com.leadsquared.hr.knowledge.security.SignedInUser;
@@ -36,7 +37,10 @@ class IamControllerTest {
   void setUp() {
     iam = Mockito.mock(IamService.class);
     currentUser = Mockito.mock(CurrentUser.class);
-    mvc = MockMvcBuilders.standaloneSetup(new IamController(iam, currentUser)).build();
+    mvc =
+        MockMvcBuilders.standaloneSetup(
+                new IamController(iam, currentUser, Mockito.mock(AdminAuditService.class)))
+            .build();
   }
 
   private void signedInAs(String email) {

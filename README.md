@@ -6,10 +6,11 @@ Robin is an AI HR assistant that answers employee questions on leave, payroll,
 benefits and compliance — available 24/7, grounded in HR's own documents, and
 never guessing. Employees reach it in the portal or from Microsoft Teams.
 
-Robin's face is `public/robin.png`. The UI renders `robin-160.png`, a 22 KB
-derivative — the original is 1024×1536 and 2.5 MB, and `images.unoptimized` is set,
-so using it directly would fetch 2.5 MB to draw a 30px avatar. Regenerate with
-`sips -Z 160 robin.png --out robin-160.png` if you replace the artwork.
+Robin's mark is `public/robin.png` — a 1254×1254 square app icon. The UI renders
+`robin-160.png`, a 24 KB derivative, because `images.unoptimized` is set and nothing
+downsizes at build time, so using the 800 KB original would fetch all of it to draw a
+30px badge. Regenerate with `sips -Z 160 robin.png --out robin-160.png` if you replace
+the artwork.
 
 ## Features
 

@@ -23,7 +23,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         ...body,
         id: body.id ?? 'HR-STUB',
         status: 'open',
-        assignee: body.sensitive ? 'Priya Nair (HR Head)' : 'HR Ops Queue',
+        assignee: body.sensitive ? 'HR Ops Team' : 'HR Ops Queue',
         priority: body.sensitive ? 'critical' : 'normal',
         route: body.sensitive ? 'hr_head' : 'hr_ops',
         confidential: !!body.sensitive,
@@ -62,7 +62,6 @@ function opts(knowledge: KnowledgeAnswer | null) {
     faqs: DEFAULT_FAQS,
     email: 'employee@company.com',
     userName: 'Ananya Sharma',
-    channel: 'HR Portal',
     transcript: [] as { role: 'user' | 'bot'; text: string }[],
     askKnowledge: knowledge
       ? async (q: string) => {

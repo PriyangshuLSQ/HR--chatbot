@@ -43,6 +43,8 @@ public final class Chunker {
       Pattern.compile("[^.!?]+[.!?]+(?:\\s|\\z)|[^.!?]+\\z");
   /** A sentence boundary inside the overlap window, so overlap reads as prose. */
   private static final Pattern SENTENCE_BOUNDARY = Pattern.compile("[.!?]\\s");
+  /** Any run of digits, for telling a table row from a sentence. See {@link #looksTabular}. */
+  private static final Pattern NUMBER_RUN = Pattern.compile("\\d[\\d,.]*");
 
   private record Section(List<String> headings, String body) {}
 
@@ -190,13 +192,59 @@ public final class Chunker {
     return out;
   }
 
-  /** The trailing sentences of a chunk, carried into the next one as overlap. */
+  /**
+   * The trailing sentences of a chunk, carried into the next one as overlap.
+   *
+   * <p>Two guards, both learned from one wrong answer. Asked for the car-lease entitlement of
+   * grade X4, the assistant replied INR 50,00,000 — the value on a different row. The table
+   * itself was chunked perfectly: every row, X4 included, sat in one chunk. What retrieval
+   * actually matched was <em>this</em> overlap: 160 raw characters off the end of that chunk,
+   * which began mid-number and carried the last three rows of the table without its header.
+   * A headerless fragment of a table is not a shortened version of it, it is a different and
+   * misleading document — it looks like a complete entitlement table to an embedding model, and
+   * a grade absent from it reads as a grade with no entitlement rather than as a truncation.
+   */
   private static String tailOf(String text) {
     if (text.length() <= OVERLAP_CHARS) return text + "\n\n";
 
     String tail = text.substring(text.length() - OVERLAP_CHARS);
     Matcher boundary = SENTENCE_BOUNDARY.matcher(tail);
-    String clean = boundary.find() ? tail.substring(boundary.start() + 2) : tail;
+
+    String clean;
+    if (boundary.find()) {
+      clean = tail.substring(boundary.start() + 2);
+    } else {
+      // No sentence boundary in the window — which is exactly what a table looks like, since
+      // rows carry no terminal punctuation. Cutting at the next line beats the raw character
+      // slice that produced an overlap starting with the string "00".
+      int lineBreak = tail.indexOf('\n');
+      clean = lineBreak >= 0 ? tail.substring(lineBreak + 1) : tail;
+    }
+
+    // Rows without their header: carry nothing rather than a fragment that can be retrieved
+    // and answered from. The full table is intact in the chunk this overlap came from, so
+    // dropping it loses no content — only a duplicate that could outrank the original.
+    if (looksTabular(clean)) return "";
+
     return clean.isBlank() ? "" : clean.trim() + "\n\n";
+  }
+
+  /**
+   * Whether a passage reads as table rows rather than prose.
+   *
+   * <p>Two or more lines each carrying two or more numbers. Deliberately crude, and only ever
+   * consulted about an overlap window — the cost of a false positive is one chunk starting
+   * without its overlap, not a lost or mangled passage.
+   */
+  private static boolean looksTabular(String text) {
+    int rows = 0;
+    for (String line : text.split("\n")) {
+      if (line.isBlank()) continue;
+      Matcher numbers = NUMBER_RUN.matcher(line);
+      int found = 0;
+      while (numbers.find() && found < 2) found++;
+      if (found >= 2 && ++rows >= 2) return true;
+    }
+    return false;
   }
 }

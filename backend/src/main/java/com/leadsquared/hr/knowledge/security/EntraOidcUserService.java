@@ -1,6 +1,8 @@
 package com.leadsquared.hr.knowledge.security;
 
+import com.leadsquared.hr.knowledge.audit.LoginTracker;
 import com.leadsquared.hr.knowledge.iam.IamService;
+import com.leadsquared.hr.knowledge.model.LoginRecord;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import org.springframework.security.core.GrantedAuthority;
@@ -23,10 +25,12 @@ public class EntraOidcUserService extends OidcUserService {
 
   private final AuthProperties props;
   private final IamService iam;
+  private final LoginTracker logins;
 
-  public EntraOidcUserService(AuthProperties props, IamService iam) {
+  public EntraOidcUserService(AuthProperties props, IamService iam, LoginTracker logins) {
     this.props = props;
     this.iam = iam;
+    this.logins = logins;
   }
 
   @Override
@@ -40,6 +44,11 @@ public class EntraOidcUserService extends OidcUserService {
     // AdminConsoleAccess re-decides on every request, because a role revoked in the
     // console has to take effect before the next sign-in.
     SignedInUser resolved = new CurrentUser(props, iam).from(user);
+
+    // The one place a real Entra sign-in completes, which is why the record is written here and
+    // not on a later request: a session that is created and never used is still a sign-in, and
+    // recording it per-request would count page loads instead.
+    logins.recordLogin(resolved.email(), resolved.name(), LoginRecord.ENTRA);
 
     Set<GrantedAuthority> authorities = new LinkedHashSet<>(user.getAuthorities());
     authorities.add(new SimpleGrantedAuthority("ROLE_" + resolved.role().toUpperCase()));

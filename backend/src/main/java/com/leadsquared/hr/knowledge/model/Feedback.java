@@ -30,5 +30,4 @@ public record Feedback(
     String intentLabel,
     String query,
     double confidence,
-    @Indexed String createdAt,
-    String channel) {}
+    @Indexed String createdAt) {}

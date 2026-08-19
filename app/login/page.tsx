@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useChatbotAuth } from '@/lib/chatbot-auth';
 import { PoweredByLeadSquared, ROBIN_NAME, RobinAvatar } from '@/components/Robin';
-import { CHANNELS } from '@/lib/channel';
 import {
   CalendarIcon,
   CheckIcon,
@@ -16,9 +15,8 @@ import {
 } from '@/components/Icons';
 
 /**
- * Sign-in for both surfaces. Microsoft Entra ID SSO is the primary path — it is
- * how employees arrive from Teams — with email/password kept as the portal
- * fallback.
+ * Sign-in. Microsoft Entra ID SSO is the primary path, with email/password kept as a fallback for
+ * accounts outside the tenant.
  *
  * Auth is simulated: no credential is verified or transmitted. Point `login()`
  * in lib/chatbot-auth at MSAL or your IdP to make it real.
@@ -37,17 +35,26 @@ const HIGHLIGHTS = [
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, user, isLoading, ssoEnabled, signInUrl, localLoginEnabled } = useChatbotAuth();
+  const {
+    login,
+    user,
+    isLoading,
+    ssoEnabled,
+    signInUrl,
+    localLoginEnabled,
+    devSignIn,
+    devSignInEmail,
+    devLogin,
+  } = useChatbotAuth();
   const [mode, setMode] = useState<'employee' | 'admin'>('employee');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState<null | 'sso' | 'password'>(null);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    const stored = localStorage.getItem('hr_theme');
-    if (stored) document.documentElement.setAttribute('data-theme', stored);
-  }, []);
+  // The theme is applied before paint by the bootstrap script in the root layout, so this page
+  // needs no restore of its own. It has no toggle either — signing in is not the moment to offer
+  // one, and whatever was chosen last is already in force.
 
   // A failed Entra sign-in comes back to /login?error. Without this the browser
   // lands on a pristine login page with no hint that anything went wrong, and the
@@ -69,17 +76,13 @@ export default function LoginPage() {
     router.replace(user.role === 'hr_admin' ? '/admin' : '/chat');
   }, [isLoading, user, router]);
 
-  const go = async (channelId: 'portal' | 'teams', mail: string, pass: string) => {
+  const go = async (mail: string, pass: string) => {
     try {
       await login(mail, pass, mode === 'admin' ? 'hr_admin' : 'employee');
       // The redirect effect above sends you on once the session lands, using the
       // role the server assigned. The tab is a hint about what you came for, not a
       // grant — asking for the admin console does not make you an admin.
-      const destination = mode === 'admin' ? '/admin' : '/chat';
-      const channel = CHANNELS.find((c) => c.id === channelId) ?? CHANNELS[0];
-      // The channel is stamped on tickets and feedback for per-surface analytics.
-      localStorage.setItem('hr_channel', channel.id);
-      router.push(channelId === 'teams' ? `${destination}?channel=teams` : destination);
+      router.push(mode === 'admin' ? '/admin' : '/chat');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign-in failed');
       setBusy(null);
@@ -90,9 +93,21 @@ export default function LoginPage() {
     setError('');
     setBusy('sso');
 
-    // The channel is stamped on tickets and feedback, and the round trip through
-    // Microsoft loses any component state, so record it before leaving.
-    localStorage.setItem('hr_channel', CHANNELS.find((c) => c.id === 'teams')?.id ?? 'portal');
+    // TEMPORARY, while the Entra app registration is pending approval. The server has offered a
+    // stand-in, so this button establishes a session directly rather than starting a flow that
+    // cannot complete yet. Delete this branch — and the two properties behind it — once the real
+    // registration lands; everything below is the permanent path and is untouched.
+    if (devSignIn) {
+      void devLogin()
+        .then((signedIn) => {
+          router.push(signedIn.role === 'hr_admin' ? '/admin' : '/chat');
+        })
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : 'Sign-in failed');
+          setBusy(null);
+        });
+      return;
+    }
 
     if (ssoEnabled && signInUrl) {
       // A full-page navigation, not fetch(): the authorization code flow is a
@@ -106,7 +121,7 @@ export default function LoginPage() {
     // No Entra credentials configured — the server is open, so this is the demo
     // identity rather than a pretend token.
     const mail = mode === 'admin' ? 'hr@company.com' : 'employee@company.com';
-    setTimeout(() => void go('teams', mail, 'demo'), 400);
+    setTimeout(() => void go(mail, 'demo'), 400);
   };
 
   const passwordSignIn = (e: React.FormEvent) => {
@@ -117,7 +132,7 @@ export default function LoginPage() {
     }
     setError('');
     setBusy('password');
-    void go('portal', email, password);
+    void go(email, password);
   };
 
   const demoSignIn = () => {
@@ -126,7 +141,7 @@ export default function LoginPage() {
     setPassword('demo');
     setError('');
     setBusy('password');
-    void go('portal', mail, 'demo');
+    void go(mail, 'demo');
   };
 
   return (
@@ -289,10 +304,34 @@ export default function LoginPage() {
             disabled={busy !== null || isLoading}
           >
             <TeamsIcon size={18} />
-            {busy === 'sso' ? 'Redirecting to Microsoft…' : 'Continue with Microsoft SSO'}
+            {busy === 'sso'
+              ? devSignIn
+                ? 'Signing in…'
+                : 'Redirecting to Microsoft…'
+              : 'Continue with Microsoft SSO'}
           </button>
 
-          {ssoEnabled && (
+          {/*
+            TEMPORARY — remove with the bypass. Says plainly that this button is not reaching
+            Microsoft yet and which account it lands on, because a sign-in screen that silently
+            does something other than what it says is how a stand-in survives past its welcome.
+          */}
+          {devSignIn && (
+            <p
+              style={{
+                fontSize: '0.75rem',
+                color: 'var(--error-ink)',
+                textAlign: 'center',
+                marginTop: '0.75rem',
+                lineHeight: 1.5,
+              }}
+            >
+              Temporary sign-in — the Entra app registration is still pending, so this signs in
+              as <strong>{devSignInEmail}</strong> without Microsoft.
+            </p>
+          )}
+
+          {ssoEnabled && !devSignIn && (
             <p
               style={{
                 fontSize: '0.75rem',
@@ -307,16 +346,6 @@ export default function LoginPage() {
             </p>
           )}
 
-          <p
-            style={{
-              fontSize: '0.6875rem',
-              color: 'var(--faint)',
-              textAlign: 'center',
-              marginTop: '0.5rem',
-            }}
-          >
-            Also available as a Microsoft Teams app — same account, no second login.
-          </p>
 
           {/*
             Shown whenever the server says email/password may create a session —

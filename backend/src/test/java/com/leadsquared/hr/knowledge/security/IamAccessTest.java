@@ -57,7 +57,9 @@ class IamAccessTest {
   void setUp() {
     roles = Mockito.mock(IamRoleRepository.class);
     users = Mockito.mock(IamUserRepository.class);
-    iam = new IamService(roles, users);
+    // No seeded admin addresses: these tests are about the permission lookup, and a seeder
+    // writing to a mocked repository would only add noise to the verifications below.
+    iam = new IamService(roles, users, "");
   }
 
   private void assign(String email, String... roleNames) {
@@ -246,10 +248,51 @@ class IamAccessTest {
         .hasMessageContaining("built-in");
   }
 
-  /** An unknown permission would save happily and grant nothing. */
+  /**
+   * Creating a role again, and the validation that has to come back with it.
+   *
+   * <p>These were removed when the role set was fixed at two — with {@code admin.console} as the
+   * only real grant, a third role could differ from the built-ins in name alone, so there was
+   * nothing worth minting. Now that each area of the console is its own permission there is, and
+   * the checks matter again.
+   */
   @Test
-  void anUnknownPermissionIsRejectedRatherThanStoredInert() {
-    when(roles.existsByName("payroll-viewer")).thenReturn(false);
+  void aRoleCanBeCreatedWithAChosenSetOfPermissions() {
+    when(roles.findByName("policy-librarian")).thenReturn(Optional.empty());
+    when(roles.save(any(IamRole.class))).thenAnswer(call -> call.getArgument(0));
+
+    IamRole created =
+        iam.createRole(
+            "policy-librarian",
+            "Policy Librarian",
+            "Maintains the policy library.",
+            Set.of(Permissions.ADMIN_CONSOLE, Permissions.ADMIN_KNOWLEDGE),
+            "me");
+
+    assertThat(created.name()).isEqualTo("policy-librarian");
+    assertThat(created.permissions())
+        .containsExactlyInAnyOrder(Permissions.ADMIN_CONSOLE, Permissions.ADMIN_KNOWLEDGE);
+    // Never built-in: those are re-asserted from constants on every boot, which would overwrite
+    // whatever was chosen here at the next restart.
+    assertThat(created.builtIn()).isFalse();
+  }
+
+  @Test
+  void aRoleNameIsDerivedFromTheLabelAndSlugged() {
+    when(roles.findByName(any())).thenReturn(Optional.empty());
+    when(roles.save(any(IamRole.class))).thenAnswer(call -> call.getArgument(0));
+
+    IamRole created =
+        iam.createRole(null, "Payroll  Viewer!", "", Set.of(Permissions.ADMIN_CONSOLE), "me");
+
+    assertThat(created.name()).isEqualTo("payroll-viewer");
+  }
+
+  @Test
+  void anUnknownPermissionIsRefusedRatherThanStoredInert() {
+    // The reason this check exists: an unrecognised string saves happily and grants nothing, so
+    // the console would show access that every endpoint goes on refusing.
+    when(roles.findByName(any())).thenReturn(Optional.empty());
 
     assertThat(
             catchThrowable(
@@ -261,12 +304,39 @@ class IamAccessTest {
   }
 
   @Test
-  void aRoleNameHasToBeASlug() {
+  void aDuplicateNameIsRefused() {
+    when(roles.findByName("hr-ops")).thenReturn(Optional.of(ADMIN_ROLE));
+
     assertThat(
             catchThrowable(
-                () -> iam.createRole("Payroll Viewer!", "Payroll viewer", "", Set.of(), "me")))
+                () -> iam.createRole("hr-ops", "HR Ops", "", Set.of(Permissions.ADMIN_CONSOLE), "me")))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("lower-case letters");
+        .hasMessageContaining("already exists");
+  }
+
+  @Test
+  void aRoleNeedsAName() {
+    assertThat(catchThrowable(() -> iam.createRole(null, "  ", "", Set.of(), "me")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("needs a name");
+  }
+
+  @Test
+  void theTwoFixedRolesCannotBeDeleted() {
+    IamRole hrOps =
+        new IamRole(
+            "9",
+            IamService.HR_OPS_ROLE,
+            "HR Ops",
+            "",
+            Set.of(Permissions.ADMIN_CONSOLE),
+            true,
+            "2026-01-01T00:00:00Z",
+            "system");
+    when(roles.findByName(IamService.HR_OPS_ROLE)).thenReturn(Optional.of(hrOps));
+
+    assertThat(catchThrowable(() -> iam.deleteRole(IamService.HR_OPS_ROLE)))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

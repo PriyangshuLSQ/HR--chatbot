@@ -21,12 +21,15 @@ import { fetchTicket, fetchTickets, postTicketComment } from '@/lib/hr-api';
 import { ROUTE_LABELS, type Ticket, type TicketStatus } from '@/lib/hr-store';
 import { RobinAvatar } from '@/components/Robin';
 import RichText from '@/components/RichText';
+import { useTheme } from '@/lib/theme';
 import {
   ChatIcon,
   CheckCircleIcon,
   ClockIcon,
+  MoonIcon,
   SendIcon,
   ShieldIcon,
+  SunIcon,
   TicketIcon,
 } from '@/components/Icons';
 
@@ -88,6 +91,7 @@ function StatusChip({ status, large = false }: { status: TicketStatus; large?: b
 
 export default function TicketsPage() {
   const router = useRouter();
+  const { theme, toggleTheme } = useTheme();
   const { user, isLoading: authLoading, ssoEnabled } = useChatbotAuth();
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -190,6 +194,20 @@ export default function TicketsPage() {
               : `${counts.all} ticket${counts.all === 1 ? '' : 's'} · ${counts.open + counts['in-progress']} still open`}
           </p>
         </div>
+        {/*
+          Same control as the chat header, so the theme can be changed from wherever the employee
+          happens to be rather than only from the page that owned the toggle.
+        */}
+        <button
+          className="btn btn-ghost"
+          style={{ padding: '0.4375rem' }}
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+        </button>
+
         <a href="/chat" className="btn btn-secondary btn-sm">
           <ChatIcon size={15} />
           <span className="hide-mobile">Back to chat</span>
