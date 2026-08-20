@@ -14,7 +14,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.leadsquared.hr.knowledge.model.Ticket;
 import com.leadsquared.hr.knowledge.model.TicketComment;
+import com.leadsquared.hr.knowledge.model.Permissions;
 import com.leadsquared.hr.knowledge.security.CurrentUser;
+import com.leadsquared.hr.knowledge.security.PermissionChecker;
 import com.leadsquared.hr.knowledge.security.SignedInUser;
 import com.leadsquared.hr.knowledge.tickets.TicketService;
 import java.util.List;
@@ -42,6 +44,7 @@ class TicketAccessTest {
 
   private TicketService tickets;
   private CurrentUser currentUser;
+  private PermissionChecker permissions;
   private MockMvc mvc;
 
   private static Ticket ticket(boolean confidential) {
@@ -60,7 +63,6 @@ class TicketAccessTest {
         0.18,
         List.of(),
         confidential,
-        "HR Portal",
         List.of());
   }
 
@@ -68,10 +70,30 @@ class TicketAccessTest {
   void setUp() {
     tickets = Mockito.mock(TicketService.class);
     currentUser = Mockito.mock(CurrentUser.class);
-    mvc = MockMvcBuilders.standaloneSetup(new TicketController(tickets, currentUser)).build();
+    permissions = Mockito.mock(PermissionChecker.class);
+    mvc =
+        MockMvcBuilders.standaloneSetup(
+                new TicketController(tickets, currentUser, permissions))
+            .build();
   }
 
+  /**
+   * @param admin whether this session holds the escalation-queue permission. Was the HR_ADMIN
+   *     role; the queue is now gated by {@code admin.tickets} read per request, so the role on the
+   *     session no longer decides it. Sensitive escalations need a second grant — see {@link
+   *     #signedInAs(String, boolean, boolean)}.
+   */
   private void signedInAs(String email, boolean admin) {
+    signedInAs(email, admin, admin);
+  }
+
+  private void signedInAs(String email, boolean queue, boolean sensitive) {
+    when(permissions.has(org.mockito.ArgumentMatchers.<SignedInUser>any(),
+            org.mockito.ArgumentMatchers.eq(Permissions.ADMIN_TICKETS)))
+        .thenReturn(queue);
+    when(permissions.has(org.mockito.ArgumentMatchers.<SignedInUser>any(),
+            org.mockito.ArgumentMatchers.eq(Permissions.ADMIN_TICKETS_SENSITIVE)))
+        .thenReturn(sensitive);
     when(currentUser.get())
         .thenReturn(
             Optional.of(
@@ -79,7 +101,7 @@ class TicketAccessTest {
                     email,
                     email,
                     "Someone",
-                    admin ? SignedInUser.HR_ADMIN : SignedInUser.EMPLOYEE)));
+                    queue ? SignedInUser.HR_ADMIN : SignedInUser.EMPLOYEE)));
   }
 
   // -------------------------------------------------------------------------
@@ -270,8 +292,8 @@ class TicketAccessTest {
     Ticket theirs =
         new Ticket(
             "SEN-4C2A1", "something else", "", OTHER, "Withheld (confidential)",
-            "2026-08-02T00:00:00Z", "open", "critical", "hr_head", "Priya Nair",
-            List.of(), 1.0, List.of(), true, "HR Portal", List.of());
+            "2026-08-02T00:00:00Z", "open", "critical", "hr_head", "HR Ops Team",
+            List.of(), 1.0, List.of(), true, List.of());
 
     when(tickets.list()).thenReturn(List.of(mine, theirs));
 
@@ -289,6 +311,78 @@ class TicketAccessTest {
     when(tickets.find("HR-9B71D")).thenReturn(Optional.of(ticket(true)));
 
     mvc.perform(get("/api/tickets/HR-9B71D")).andExpect(status().isOk());
+  }
+
+  // -------------------------------------------------------------------------
+  // The queue, split from the sensitive matters inside it
+  // -------------------------------------------------------------------------
+
+  /**
+   * The reason the console stopped being one grant.
+   *
+   * <p>Working the escalation queue used to mean reading every harassment report in it, so the
+   * only way to let somebody handle ordinary escalations was to hand them the confidential ones
+   * too. Queue access and sensitive access are now two permissions, and this is the case that says
+   * so.
+   */
+  @Test
+  void theQueueWithoutTheSensitivePermissionExcludesConfidentialEscalations() throws Exception {
+    signedInAs(ADMIN, true, false);
+
+    Ticket ordinary = ticket(false);
+    Ticket confidential =
+        new Ticket(
+            "SEN-4C2A1", "a grievance", "", OTHER, "Withheld (confidential)",
+            "2026-08-02T00:00:00Z", "open", "critical", "hr_head", "HR Ops Team",
+            List.of(), 1.0, List.of(), true, List.of());
+
+    when(tickets.list()).thenReturn(List.of(ordinary, confidential));
+
+    mvc.perform(get("/api/tickets"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tickets.length()").value(1))
+        .andExpect(jsonPath("$.tickets[0].id").value("HR-9B71D"));
+  }
+
+  @Test
+  void theSensitivePermissionAddsThemBack() throws Exception {
+    signedInAs(ADMIN, true, true);
+
+    Ticket confidential =
+        new Ticket(
+            "SEN-4C2A1", "a grievance", "", OTHER, "Withheld (confidential)",
+            "2026-08-02T00:00:00Z", "open", "critical", "hr_head", "HR Ops Team",
+            List.of(), 1.0, List.of(), true, List.of());
+
+    when(tickets.list()).thenReturn(List.of(ticket(false), confidential));
+
+    mvc.perform(get("/api/tickets"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tickets.length()").value(2));
+  }
+
+  /**
+   * The single-item route has to agree with the list, or the split is decorative: a record hidden
+   * from the queue and readable by id is still readable.
+   */
+  @Test
+  void aConfidentialTicketIsNotReadableByIdWithoutTheSensitivePermission() throws Exception {
+    signedInAs(ADMIN, true, false);
+    when(tickets.find("SEN-4C2A1")).thenReturn(Optional.of(ticket(true)));
+
+    mvc.perform(get("/api/tickets/SEN-4C2A1")).andExpect(status().isNotFound());
+  }
+
+  @Test
+  void withoutTheQueuePermissionAnAdminSeesOnlyTheirOwn() throws Exception {
+    // Holding admin.console and nothing else reaches no escalations at all — the console
+    // permission is the front door, not a grant to what is behind it.
+    signedInAs(OTHER, false, false);
+    when(tickets.list()).thenReturn(List.of(ticket(false)));
+
+    mvc.perform(get("/api/tickets"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tickets.length()").value(0));
   }
 
   @Test

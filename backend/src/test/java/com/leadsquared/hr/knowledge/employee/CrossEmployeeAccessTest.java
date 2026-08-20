@@ -166,6 +166,247 @@ class CrossEmployeeAccessTest {
         .isFalse();
   }
 
+  /**
+   * An apostrophe is not a colleague.
+   *
+   * <p>{@code 's} elides "is" as often as it marks possession, and the possessive check read the
+   * word before it as somebody's name: "what's my variable pay?" captured {@code what} and the
+   * employee was told they may only ask about their own record — while asking about their own
+   * record. Every {@code what's my …}, {@code who's my …} and {@code where's my …} question was
+   * refused, and the same sentence without the apostrophe worked.
+   *
+   * <p>Refusing a first-person question is the worst direction for this guard to fail in, so both
+   * sides are pinned: the contraction must pass, and a real name beside a contraction must not.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what's my variable pay?",
+        "what's my leave balance?",
+        "what's my ctc?",
+        "who's my hrbp?",
+        "where's my payslip?",
+        "how's my attendance this month?",
+        "there's a question I have about my leave",
+      })
+  @DisplayName("A contraction is not a possessive, and must not refuse a first-person question")
+  void contractionsAreNotNames(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — the apostrophe is an elided \"is\": %s", question)
+        .isFalse();
+  }
+
+  /**
+   * "Total" does two jobs, and conflating them refused a question about nobody but the asker.
+   *
+   * <p>"My total CTC" is one person's fixed plus variable — the ordinary way to refer to your own
+   * package — while "the total payroll of my team" is an aggregate over colleagues. Both matched
+   * the same pattern, so "what is my total ctc with my variable pay" was answered with the notice
+   * about other employees' data.
+   *
+   * <p>The fix is a scope test rather than a first-person exemption, which this class deliberately
+   * does not have: "the average salary in my BU" is first person and still a breach.
+   */
+  /**
+   * A superlative is not a ranking of colleagues.
+   *
+   * <p>The assistant's own payout caveat reads "this is the maximum indicated by policy". An
+   * employee who pasted that answer back to ask a follow-up was refused with the privacy notice —
+   * for quoting the bot at itself. "Maximum", "most" and "highest" do ordinary work in a sentence
+   * about one person, and only disclose somebody when they range over a set of people.
+   */
+  /**
+   * A role named in a policy question is not a colleague.
+   *
+   * <p>"Function head" and "manager" name people, and they also name rungs in the variable pay
+   * policies. A worked example about a US Sales Function Head at 110% of target concerns nobody at
+   * all, and it was refused with the notice about other employees' data. Requiring a possessive is
+   * what separates the two readings — and the bare-noun version escaped notice only because "VP"
+   * and "utilisation" were not in the personal-field vocabulary, which is luck rather than design.
+   */
+  /**
+   * A colleague in the sentence is not a colleague's data being asked for.
+   *
+   * <p>The role check used to be co-occurrence: strip the role word, then look for any personal
+   * field anywhere. "My manager is asking me to take LOP for 3 days — how will this affect my
+   * salary and PF?" contains "manager" and "salary", and was refused as a request for the
+   * manager's record. Colleagues appear in an employee's own circumstances constantly — approving
+   * leave, asking for cover, rejecting a claim — and reading every mention as a data request
+   * refuses ordinary HR questions.
+   *
+   * <p>What separates the two is possession: "my manager's CTC" and "the CTC of my manager" reach
+   * for their record; "my manager asked me to take LOP" does not.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "My manager is asking me to take LOP for 3 days because I exhausted my leave. How will this affect my salary and PF this month?",
+        "my manager approved my leave, when will I be paid",
+        "my hrbp told me to check my grade, what is it",
+        "my manager rejected my expense claim, what is the policy",
+      })
+  @DisplayName("A colleague mentioned in the asker's own circumstances is not a data request")
+  void colleaguesInContextAreNotDataRequests(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — everything asked for belongs to the asker: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is the ctc of my manager",
+        "what is the grade of my reporting manager",
+        "salary of my team lead",
+        "what is my manager's ctc",
+      })
+  @DisplayName("A field belonging to a colleague is still refused")
+  void possessedFieldsAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — the field belongs to the colleague: %s", question)
+        .isTrue();
+  }
+
+  /**
+   * "My direct reporting manager" is the asker's own field; "my direct report" is somebody else.
+   *
+   * <p>The predicate pattern carried a bare "my direct", meant as the second. It also matched the
+   * first, so "who is my reporting manager" was allowed and inserting the word "direct" refused it
+   * — a stated outcome turned into a privacy notice by one adjective.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "Who is my direct reporting manager and who is my L2 manager?",
+        "Who is my direct reporting manager and L2 manager?",
+        "who is my direct reporting manager",
+      })
+  @DisplayName("A manager's name is a field on the asker's own record, however it is phrased")
+  void directReportingManagerIsOwnRecord(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — the manager's name is on the asker's record: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is my direct report's salary",
+        "my directs and their ctc",
+        "who reports to me and what do they earn",
+      })
+  @DisplayName("A subordinate's data is still refused")
+  void directReportsAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this reaches for a subordinate's record: %s", question)
+        .isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "US sales function head with variable pay $180,000 at 110% of target",
+        "PS manager India, VP 200000, utilisation 78%",
+        "what does a KAM manager earn at 120% of target",
+      })
+  @DisplayName("A policy role in a worked example is not a colleague")
+  void policyRolesAreNotColleagues(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — this is a policy hypothetical about nobody: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is my manager's ctc",
+        "my hrbp's salary",
+        "their manager's incentive",
+        "average incentive in the sales team",
+      })
+  @DisplayName("A role belonging to somebody is still refused")
+  void possessedRolesAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this reaches for a person: %s", question)
+        .isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "this is the maximum indicated by policy, what would it be monthly?",
+        "you said the maximum is 76,500 — is that before tax?",
+        "what is the most i could get at my grade",
+        "at minimum what will my payout be",
+      })
+  @DisplayName("A superlative about the asker's own pay is not a ranking")
+  void superlativesAboutOneselfAreAllowed(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — no set of people is being ranked: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "who earns the most",
+        "Who earns the highest in my team?",
+        "the highest paid person in engineering",
+        "what is the maximum salary across the department",
+        "who is the top earner among my peers",
+      })
+  @DisplayName("A superlative ranging over people is still refused")
+  void superlativesOverPeopleAreRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this ranks colleagues: %s", question)
+        .isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is my total ctc with my variable pay",
+        "what is my total ctc",
+        "my total compensation",
+        "what is my total pay",
+      })
+  @DisplayName("A personal total is the asker's own fixed plus variable, not an aggregate")
+  void personalTotalsAreNotAggregates(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — this totals the asker's own components: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is the total payroll of my team",
+        "total ctc of everyone in my department",
+        "combined salary of my team",
+        "sum of salaries in engineering",
+        "total ctc for my grade",
+      })
+  @DisplayName("A total scoped across people is still an aggregate")
+  void totalsAcrossPeopleAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this sums across colleagues: %s", question)
+        .isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what's rohit's ctc",
+        "what's Priya Sharma's leave balance",
+        "who's seen rohit panwar's salary",
+      })
+  @DisplayName("A name beside a contraction is still refused")
+  void namesBesideContractionsAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this names a colleague: %s", question)
+        .isTrue();
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {

@@ -1,5 +1,5 @@
 {
-  "name": "my-project",
+  "name": "hr-chatbot-robin",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test:nlu": "tsc lib/nlu.ts lib/nlu.test.ts lib/chatbot-data.ts --outDir .nlu-build --module commonjs --target es2020 --moduleResolution node --skipLibCheck --lib es2020 && node .nlu-build/nlu.test.js",
     "test:nlu:holdout": "tsc lib/nlu.ts lib/nlu.holdout.test.ts lib/chatbot-data.ts --outDir .nlu-build --module commonjs --target es2020 --moduleResolution node --skipLibCheck --lib es2020 && node .nlu-build/nlu.holdout.test.js",
-    "test:precedence": "tsc lib/precedence.check.ts --outDir .nlu-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck --lib es2022,dom && node .nlu-build/precedence.check.js"
+    "test:precedence": "tsc lib/precedence.check.ts --outDir .nlu-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck --lib es2022,dom && node .nlu-build/precedence.check.js",
+    "test:escalation": "tsc lib/escalation-consent.check.ts --outDir .nlu-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck --lib es2022,dom && node .nlu-build/escalation-consent.check.js",
+    "test:clarify": "tsc lib/clarify-refine.check.ts --outDir .nlu-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck --lib es2022,dom && node .nlu-build/clarify-refine.check.js"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

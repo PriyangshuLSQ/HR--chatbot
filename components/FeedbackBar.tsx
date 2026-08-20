@@ -17,14 +17,12 @@ export function FeedbackBar({
   intentId,
   intentLabel,
   confidence,
-  channel,
 }: {
   messageId: string;
   query: string;
   intentId?: string;
   intentLabel?: string;
   confidence: number;
-  channel: string;
 }) {
   const [rating, setRating] = useState<Rating | null>(null);
   const [showComment, setShowComment] = useState(false);
@@ -48,7 +46,6 @@ export function FeedbackBar({
       intentId,
       intentLabel,
       confidence,
-      channel,
     }).catch(() => {});
     // Only a negative rating is worth interrupting for a reason.
     if (value === 'down') setShowComment(true);
@@ -63,7 +60,6 @@ export function FeedbackBar({
       intentId,
       intentLabel,
       confidence,
-      channel,
     }).catch(() => {});
     setShowComment(false);
     setSent(true);

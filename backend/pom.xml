@@ -12,9 +12,9 @@
   </parent>
 
   <groupId>com.leadsquared.hr</groupId>
-  <artifactId>knowledge-backend</artifactId>
+  <artifactId>hr-chatbot-robin-backend</artifactId>
   <version>0.1.0</version>
-  <name>people-insights-knowledge-backend</name>
+  <name>hr-chatbot-robin-backend</name>
   <description>HR knowledge base: parsing, chunking, embedding, hybrid retrieval and grounded answers</description>
 
   <properties>

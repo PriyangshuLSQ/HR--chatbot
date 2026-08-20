@@ -1,5 +1,7 @@
 package com.leadsquared.hr.knowledge.web;
 
+import com.leadsquared.hr.knowledge.audit.AdminAuditService;
+import com.leadsquared.hr.knowledge.model.AdminAuditEvent;
 import com.leadsquared.hr.knowledge.model.KnowledgeDoc;
 import com.leadsquared.hr.knowledge.model.StoreStats;
 import com.leadsquared.hr.knowledge.parse.UnsupportedFileException;
@@ -36,17 +38,26 @@ public class KnowledgeController {
 
   private static final Logger log = LoggerFactory.getLogger(KnowledgeController.class);
 
-  /** Per-file cap. A 10 MB .docx is already thousands of chunks to embed. */
-  private static final long MAX_BYTES = 10L * 1024 * 1024;
+  /**
+   * Per-file cap. A 15 MB .docx is already thousands of chunks to embed.
+   *
+   * <p>Must stay below {@code spring.servlet.multipart.max-file-size}, which is deliberately set
+   * higher: Spring rejects an oversized part before this controller ever runs, and its error is a
+   * 500-shaped multipart failure rather than the readable "Too large (18.2 MB), the limit is 15 MB"
+   * an admin can act on. The headroom is what keeps the message useful.
+   */
+  private static final long MAX_BYTES = 15L * 1024 * 1024;
 
   private static final int MAX_FILES = 20;
 
   private final RagService rag;
   private final KnowledgeStore store;
+  private final AdminAuditService audit;
 
-  public KnowledgeController(RagService rag, KnowledgeStore store) {
+  public KnowledgeController(RagService rag, KnowledgeStore store, AdminAuditService audit) {
     this.rag = rag;
     this.store = store;
+    this.audit = audit;
   }
 
   // -------------------------------------------------------------------------
@@ -85,6 +96,12 @@ public class KnowledgeController {
             orDefault(body.category(), "General"),
             orDefault(body.uploadedBy(), "HR admin"));
 
+    audit.record(
+        AdminAuditEvent.POLICY_UPLOADED,
+        title,
+        "Added the entry \"" + title + "\" under " + orDefault(body.category(), "General")
+            + " — " + result.chunkCount() + " passage(s) indexed.");
+
     return ResponseEntity.status(HttpStatus.CREATED).body(result);
   }
 
@@ -96,9 +113,23 @@ public class KnowledgeController {
   public ResponseEntity<?> delete(@RequestParam(name = "id", required = false) String id) {
     if (id == null || id.isBlank()) return ApiErrors.badRequest("Missing ?id.");
 
+    // Read the title before removing it: afterwards there is nothing left to name in the trail,
+    // and "deleted document 4f2c…" is not a reviewable entry.
+    String title =
+        store.listDocs().stream()
+            .filter(d -> id.equals(d.id()))
+            .map(KnowledgeDoc::title)
+            .findFirst()
+            .orElse(id);
+
     if (!store.removeDoc(id)) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "No such document."));
     }
+
+    audit.record(
+        AdminAuditEvent.POLICY_DELETED,
+        title,
+        "Removed \"" + title + "\" from the knowledge base. The assistant can no longer cite it.");
 
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("ok", true);
@@ -184,6 +215,19 @@ public class KnowledgeController {
       }
     }
 
+    // One entry for the batch, naming what landed. Per-file rows would bury an access change
+    // under a ten-file drop, and the batch is the action the admin actually took.
+    List<String> uploaded = results.stream().filter(UploadOutcome::ok).map(UploadOutcome::filename).toList();
+    if (!uploaded.isEmpty()) {
+      int failed = results.size() - uploaded.size();
+      audit.record(
+          AdminAuditEvent.POLICY_UPLOADED,
+          String.join(", ", uploaded),
+          "Uploaded " + uploaded.size() + " document(s) under " + resolvedCategory + ": "
+              + String.join(", ", uploaded)
+              + (failed > 0 ? " (" + failed + " rejected)" : ""));
+    }
+
     return ResponseEntity.ok(new UploadResponse(results, store.stats()));
   }
 
@@ -205,6 +249,12 @@ public class KnowledgeController {
   @PostMapping("/reindex")
   public ResponseEntity<?> reindex(@RequestParam(name = "force", required = false) String force) {
     RagService.ReindexResult result = rag.reindex("1".equals(force));
+
+    audit.record(
+        AdminAuditEvent.KNOWLEDGE_REINDEXED,
+        result.model(),
+        ("1".equals(force) ? "Force re-embedded" : "Embedded") + " " + result.embedded()
+            + " passage(s) with " + result.model() + ".");
 
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("embedded", result.embedded());

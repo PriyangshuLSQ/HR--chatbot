@@ -80,12 +80,11 @@ public class DemoDataSeed implements ApplicationRunner {
             "in-progress",
             "critical",
             "hr_head",
-            "Priya Nair (HR Head)",
+            "HR Ops Team",
             List.of("sensitive", "posh", "urgent", "confidential"),
             1.0,
             List.of(),
             true,
-            "Microsoft Teams",
             List.of()),
         new Ticket(
             "HR-9B71D",
@@ -102,7 +101,6 @@ public class DemoDataSeed implements ApplicationRunner {
             0.18,
             List.of(),
             false,
-            "HR Portal",
             List.of()),
         new Ticket(
             "HR-7A33C",
@@ -119,7 +117,6 @@ public class DemoDataSeed implements ApplicationRunner {
             0.34,
             List.of(),
             false,
-            "HR Portal",
             List.of()));
   }
 
@@ -129,35 +126,35 @@ public class DemoDataSeed implements ApplicationRunner {
             "FB-SEED1", "seed-1", "down",
             "This gave me the policy but not my actual balance.",
             "leave_policy", "Leave policy & entitlement",
-            "how many leaves do i have", 0.61, daysAgo(1), "HR Portal"),
+            "how many leaves do i have", 0.61, daysAgo(1)),
         new Feedback(
             "FB-SEED2", "seed-2", "down",
             "Did not answer about arrears at all.",
             "salary_date", "When salary is credited",
-            "when will my arrears be paid", 0.44, daysAgo(2), "Microsoft Teams"),
+            "when will my arrears be paid", 0.44, daysAgo(2)),
         new Feedback(
             "FB-SEED3", "seed-3", "down", null,
             "salary_date", "When salary is credited",
-            "salary credited less this month", 0.52, daysAgo(3), "HR Portal"),
+            "salary credited less this month", 0.52, daysAgo(3)),
         new Feedback(
             "FB-SEED4", "seed-4", "up", null,
             "insurance_benefits", "Health insurance & benefits",
-            "is my father covered", 0.83, daysAgo(1), "HR Portal"),
+            "is my father covered", 0.83, daysAgo(1)),
         new Feedback(
             "FB-SEED5", "seed-5", "up", null,
             "leave_apply", "How to apply for leave",
-            "how to apply leave", 0.95, daysAgo(2), "Microsoft Teams"),
+            "how to apply leave", 0.95, daysAgo(2)),
         new Feedback(
             "FB-SEED6", "seed-6", "up", null,
             "wfh_policy", "Work-from-home policy",
-            "wfh rules", 0.88, daysAgo(3), "HR Portal"),
+            "wfh rules", 0.88, daysAgo(3)),
         new Feedback(
             "FB-SEED7", "seed-7", "up", null,
             "tax_form16", "Tax / Form 16",
-            "form 16 download", 0.91, daysAgo(4), "HR Portal"),
+            "form 16 download", 0.91, daysAgo(4)),
         new Feedback(
             "FB-SEED8", "seed-8", "up", null,
             "leave_balance", "My leave balance",
-            "leave balance", 0.97, daysAgo(5), "Microsoft Teams"));
+            "leave balance", 0.97, daysAgo(5)));
   }
 }

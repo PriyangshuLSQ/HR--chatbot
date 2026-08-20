@@ -69,11 +69,30 @@ public record Employee(
       LocalDate confirmationDate,
       String employmentStatus,
       String reportingManagerName,
-      String l2ManagerName) {}
+      String l2ManagerName,
+      /**
+       * The employee's HR business partner, from the master's {@code HRBP Name} column.
+       *
+       * <p>Held here beside the two managers because employees ask for it the same way and for
+       * the same reason — "who do I take this to". It was the one name in that set the extract
+       * carried and the import dropped, so "who is my HRBP?" was answered with "not in the
+       * documents I have access to" while the answer sat in the spreadsheet.
+       */
+      String hrbpName) {}
 
   /**
    * @param variableTargetAmount the annual variable pay target in rupees — the figure the
    *     payout matrix multiplies. Not a percentage, so no rounding is inherited from one.
+   * @param monthlyGross monthly pay before the employee's own deductions, from the extract's
+   *     {@code Monthly Gross (₹)} column.
+   * @param monthlyInHand what reaches the bank, after employee PF and professional tax, from
+   *     {@code Est. Monthly In-Hand (₹)}. Two fields rather than one because they are two
+   *     different numbers and the difference is the employee's deductions: this record used to
+   *     carry a single {@code monthlyFixedGross} loaded from the in-hand column, so "what is my
+   *     monthly gross salary" was answered with the in-hand figure — 62,100 against a true gross
+   *     of 64,100, stated flatly and with no caveat. A wrong number about someone's pay is the
+   *     failure every grounding rule here exists to prevent, and it came from the mapping rather
+   *     than the model. Keep them distinct, and label them as what they are.
    * @param lastPayoutAmount what was actually paid last cycle, for "what was my variable
    *     payout in the last appraisal cycle"
    */
@@ -81,7 +100,8 @@ public record Employee(
       BigDecimal fixedCtc,
       BigDecimal variableTargetAmount,
       BigDecimal variablePercentOfCtc,
-      BigDecimal monthlyFixedGross,
+      BigDecimal monthlyGross,
+      BigDecimal monthlyInHand,
       BigDecimal lastPayoutAmount,
       String lastPayoutCycle,
       String currency) {}

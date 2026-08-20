@@ -1,6 +1,8 @@
 package com.leadsquared.hr.knowledge.web;
 
+import com.leadsquared.hr.knowledge.audit.AdminAuditService;
 import com.leadsquared.hr.knowledge.iam.IamService;
+import com.leadsquared.hr.knowledge.model.AdminAuditEvent;
 import com.leadsquared.hr.knowledge.model.IamRole;
 import com.leadsquared.hr.knowledge.model.IamUser;
 import com.leadsquared.hr.knowledge.model.Permissions;
@@ -33,8 +35,10 @@ public class IamController {
 
   private final IamService iam;
   private final CurrentUser currentUser;
+  private final AdminAuditService audit;
 
-  public IamController(IamService iam, CurrentUser currentUser) {
+  public IamController(IamService iam, CurrentUser currentUser, AdminAuditService audit) {
+    this.audit = audit;
     this.iam = iam;
     this.currentUser = currentUser;
   }
@@ -72,7 +76,7 @@ public class IamController {
     if (body == null) return ApiErrors.badRequest("Expected a JSON body.");
 
     return ResponseEntity.ok(
-        iam.updateRole(name, body.label(), body.description(), body.permissions(), actor()));
+        auditedRoleUpdate(name, body));
   }
 
   @DeleteMapping("/roles/{name}")
@@ -105,7 +109,18 @@ public class IamController {
   public ResponseEntity<?> addUser(@RequestBody(required = false) UserRequest body) {
     if (body == null) return ApiErrors.badRequest("Expected a JSON body.");
 
-    return ResponseEntity.ok(iam.upsertUser(body.email(), body.name(), body.roles(), actor()));
+    // Whether this address was already known decides which action the trail records. "Granted"
+    // and "changed" are different events to review: one is a new person reaching the console.
+    boolean existed = iam.listUsers().stream().anyMatch(u -> u.email().equalsIgnoreCase(trimmed(body.email())));
+    IamUser saved = iam.upsertUser(body.email(), body.name(), body.roles(), actor());
+
+    audit.record(
+        existed ? AdminAuditEvent.ACCESS_CHANGED : AdminAuditEvent.ACCESS_GRANTED,
+        saved.email(),
+        (existed ? "Updated access for " : "Added ") + saved.email()
+            + " with role(s): " + describeRoles(saved.roles()) + ".");
+
+    return ResponseEntity.ok(saved);
   }
 
   @PatchMapping("/users/{email}")
@@ -114,7 +129,14 @@ public class IamController {
 
     if (body == null) return ApiErrors.badRequest("Expected a JSON body.");
 
-    return ResponseEntity.ok(iam.setUserRoles(email, body.roles()));
+    IamUser saved = iam.setUserRoles(email, body.roles());
+
+    audit.record(
+        AdminAuditEvent.ACCESS_CHANGED,
+        saved.email(),
+        "Set " + saved.email() + "'s role(s) to " + describeRoles(saved.roles()) + ".");
+
+    return ResponseEntity.ok(saved);
   }
 
   /**
@@ -133,12 +155,36 @@ public class IamController {
     }
 
     iam.deleteUser(email);
+
+    audit.record(
+        AdminAuditEvent.ACCESS_REVOKED,
+        email.trim(),
+        "Removed the access record for " + email.trim() + ".");
+
     return ResponseEntity.ok(new Ok(true));
   }
 
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
+
+  private IamRole auditedRoleUpdate(String name, RoleRequest body) {
+    IamRole saved = iam.updateRole(name, body.label(), body.description(), body.permissions(), actor());
+    audit.record(
+        AdminAuditEvent.ROLE_UPDATED,
+        saved.name(),
+        "Edited the role \"" + saved.label() + "\".");
+    return saved;
+  }
+
+  /** Role names as the trail should read them — "none" beats an empty pair of brackets. */
+  private static String describeRoles(List<String> roles) {
+    return roles == null || roles.isEmpty() ? "none" : String.join(", ", roles);
+  }
+
+  private static String trimmed(String value) {
+    return value == null ? "" : value.trim();
+  }
 
   private String actor() {
     return currentUser.get().map(SignedInUser::email).orElse("unknown");

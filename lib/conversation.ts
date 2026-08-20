@@ -87,6 +87,19 @@ export interface ConversationContext {
   pendingRoute?: RouteTarget;
   pendingTags?: string[];
   pendingConfidence?: number;
+  /**
+   * The bot asked "shall I raise a ticket?" and is waiting for the answer.
+   *
+   * Strictly that: a question was put to the employee and their next message is the reply to
+   * it. It is NOT "escalation is available here" — every answer offers that, via
+   * `BotTurn.offerEscalation` and a button the employee has to press on purpose.
+   *
+   * The distinction has teeth because a bare "okay" while this is set files a ticket. Set after
+   * a successful answer, it made "okay" mean consent when it meant acknowledgement: one real
+   * conversation went leave question → answer → "okay" → HR-5YC8F1 raised against HR Ops. So
+   * only `noCoverageTurn` and the clarify-rejected path — the two turns that actually ask — may
+   * set this, and any turn that answers the question must clear it.
+   */
   offeredEscalation?: boolean;
   lastIntentId?: string;
   lastQuery?: string;
@@ -96,7 +109,6 @@ export interface RespondOptions {
   faqs: FAQ[];
   email?: string;
   userName?: string;
-  channel: string;
   transcript: { role: 'user' | 'bot'; text: string }[];
   /**
    * Queries the RAG layer over HR's uploaded documents.
@@ -130,6 +142,45 @@ export interface RespondOptions {
 const AFFIRMATIVE = /^(y|ye|yes|yeah|yep|yup|ok|okay|sure|please|pls|do it|go ahead|escalate|raise it)\b/i;
 const NEGATIVE = /^(n|no|nope|nah|not now|its ok|it's ok|no thanks|cancel)\b/i;
 const THANKS = /^(thanks|thank you|thanku|ty|great|perfect|awesome|got it|cool)\b/i;
+
+/**
+ * A bare acknowledgement: the employee is closing the exchange, not asking anything.
+ *
+ * Deliberately checked *after* the escalation-offer branch, because the same word means
+ * different things in the two positions — "okay" is consent when the bot has just asked whether
+ * to raise a ticket, and is small talk when it has not. Reaching here means nothing was asked.
+ *
+ * Needed as its own case because otherwise an acknowledgement is sent to retrieval, matches
+ * nothing, and returns "I don't have a reliable answer to that — shall I raise a ticket?", which
+ * is both a non-sequitur and an invitation to say "okay" a second time.
+ */
+const ACKNOWLEDGEMENT =
+  /^(ok|okay|okey|oke|k|kk|alright|all right|sure|fine|noted|understood|makes sense)\b/i;
+
+/**
+ * An outright request for a ticket or a person, whether or not one was offered.
+ *
+ * This has to stand on its own rather than lean on `offeredEscalation`. "Can u raise a ticket
+ * about this very serious" was answered with a menu of leave and expense topics: it is too long
+ * for the affirmative branch, matches no intent strongly, and nothing else in the pipeline reads
+ * it as a request. Two other phrasings — "please raise a ticket", "escalate this to HR" — did
+ * work, but only by accident, because AFFIRMATIVE begins with `please` and `escalate` and the
+ * flag happened to still be set from an earlier answer. An explicit ask is now handled
+ * explicitly, which is both narrower and reliable.
+ */
+const ESCALATION_REQUEST =
+  /\b(raise|create|open|file|log|submit)\s+(a\s+|an\s+|the\s+)?(ticket|case|complaint|grievance|issue)\b/i;
+
+const WANTS_A_HUMAN =
+  /\b(escalate\s+(this|it)|speak\s+(to|with)|talk\s+(to|with)|connect\s+me|put\s+me\s+through|need\s+a\s+human|real\s+person)\b/i;
+
+/**
+ * Asking how the process works, not asking us to start it.
+ *
+ * "How do I raise a ticket" is a question with an answer; filing one on their behalf would
+ * answer a question they did not ask and leave a ticket someone has to close.
+ */
+const PROCESS_QUESTION = /\b(how\s+(do|can|would|should)\s+i|how\s+to|what.s?\s+the\s+process|where\s+do\s+i|can\s+i\s+see)\b/i;
 const GREETING = /^(hi|hii|hello|hey|good morning|good afternoon|good evening|namaste)\b/i;
 
 /** Words that signal a query is a continuation rather than a new topic. */
@@ -176,6 +227,17 @@ async function runAction(
  * something, and "I could not raise the ticket, here is who to contact" is a
  * usable answer where a claimed ticket number that does not exist is not.
  */
+/**
+ * A route that actually reaches a person.
+ *
+ * `pendingRoute` is stamped from every turn's NLU result, and an ordinary answered question
+ * carries `none` — not a queue, just the absence of one. Passing that through to a ticket would
+ * file it nowhere, so anything that is not a real desk falls back to HR Ops.
+ */
+function humanRoute(route: RouteTarget | undefined): RouteTarget {
+  return route === 'hrbp' || route === 'hr_head' || route === 'hr_ops' ? route : 'hr_ops';
+}
+
 async function raise(
   query: string,
   reason: string,
@@ -196,7 +258,6 @@ async function raise(
       tags,
       confidence,
       transcript: opts.transcript,
-      channel: opts.channel,
     });
   } catch {
     return null;
@@ -211,7 +272,7 @@ async function raise(
 function escalationFailedTurn(sensitive: boolean): BotTurn {
   return {
     content: sensitive
-      ? "I couldn't file this for you — the ticket system isn't responding.\n\nPlease contact **Priya Nair (HR Head)** or **Meera Iyer (HRBP)** directly. This matters too much to leave sitting in a form that failed."
+      ? "I couldn't file this for you — the ticket system isn't responding.\n\nPlease contact the **HR Ops Team** or your **HRBP** directly. This matters too much to leave sitting in a form that failed."
       : "I couldn't raise the ticket — the ticket system isn't responding right now.\n\nPlease email **hrops@company.com** with your question, or try again in a few minutes. Sorry about that.",
     decision: 'escalate',
     confidence: 0,
@@ -319,14 +380,19 @@ async function knowledgeTurn(
 /**
  * Nothing in the corpus cleared the floor.
  *
- * Says which is which — "not in the documents" is a different problem for HR
- * than "the assistant is broken", and it tells them the corpus has a gap worth
- * filling.
+ * Distinguished from a breakage for HR's own reporting — a coverage gap is worth filling and a
+ * broken assistant is worth fixing — but the employee is told neither. They get "I can't answer
+ * this reliably, here is a human", which is all that is actionable from their side.
  */
 function noCoverageTurn(confidence: number, corrections: BotTurn['corrections']): BotTurn {
   return {
     content:
-      "I couldn't find that in the HR documents I've been given, and I won't guess at policy — a wrong answer about leave or pay costs you real money.\n\nShall I raise a ticket with **HR Operations**? They typically respond within one business day. Reply **yes** and I'll create it with this conversation attached.",
+      // Says it cannot answer without explaining where answers come from. The previous wording
+      // ("I couldn't find that in the HR documents I've been given") described the machine's
+      // internals to someone who only wants to know when they get paid — and it framed a gap in
+      // the corpus as a limitation the employee has to understand. What they need is that this
+      // needs a person and how to reach one.
+      "I don't have a reliable answer to that, and I'd rather not guess — getting leave or pay wrong costs you real money.\n\nShall I raise a ticket with **HR Operations**? They typically respond within one business day. Reply **yes** and I'll create it with this conversation attached.",
     decision: 'escalate',
     confidence,
     offerEscalation: true,
@@ -399,13 +465,32 @@ export async function respond(
         // answer. The topic's canonical phrasing is a cleaner retrieval query
         // than the employee's "the second one", and it is combined with what
         // they originally asked so specifics in that wording are not lost.
-        const refined = `${intent.utterances[0] ?? ''} ${ctx.pendingQuery ?? ''}`.trim();
+        //
+        // Only when the reply really is a selection, though. `matchClarifyOption` accepts any
+        // reply overlapping 40% of an option's label, so a whole new question lands here too:
+        // after a car-lease question was misclassified as Leave and produced this menu, "tell me
+        // about leave policy?" matched "Leave policy & entitlement" at 2 words of 3 — and the
+        // query sent was "what is the leave policy what is the car lease entitlement value for
+        // the employee at grade x7", one question stapled to an unrelated one. Retrieval served
+        // that muddle and the employee got "I don't have a reliable answer" to a question the
+        // corpus covers.
+        //
+        // A selection is short and is not itself a question; anything else is a new question and
+        // is searched as asked. The old query is dropped rather than merged, because the
+        // employee moving on is exactly what "they typed something else" means.
+        const isSelection = !raw.includes('?') && raw.split(/\s+/).length <= 4;
+        const refined = isSelection
+          ? `${intent.utterances[0] ?? ''} ${ctx.pendingQuery ?? ''}`.trim()
+          : raw;
 
         const action = await actionTurn(intent, 0.95, [], opts);
-        if (action) return { turn: action, ctx: next };
+        if (action) return { turn: action, ctx: { ...next, offeredEscalation: false } };
 
+        // Answered, so nothing is pending. This is the exact path that filed a ticket for
+        // "okay": the employee picked an option from the menu, got a good answer, and the next
+        // acknowledgement was read as consent to an offer that was never made.
         const grounded = await knowledgeTurn(refined, opts, topicOf(intent), []);
-        if (grounded) return { turn: grounded, ctx: { ...next, offeredEscalation: true } };
+        if (grounded) return { turn: grounded, ctx: { ...next, offeredEscalation: false } };
 
         return {
           turn: noCoverageTurn(0.95, []),
@@ -434,17 +519,21 @@ export async function respond(
   // --- 2. Accepting or declining an escalation offer ----------------------
   if (ctx.offeredEscalation && AFFIRMATIVE.test(raw) && raw.length <= 24) {
     delete next.offeredEscalation;
+    // The route and confidentiality come from whatever was offered. Hardcoding `hr_ops` here
+    // would take a "yes" to the confidential offer made after a sensitive-topic answer and file
+    // it in the general queue, in front of whoever picks up the next routine ticket.
+    const wasSensitive = (ctx.pendingTags ?? []).includes('sensitive');
     const ticket = await raise(
       ctx.pendingQuery ?? ctx.lastQuery ?? raw,
       'Employee asked for a human after an automated answer',
-      'hr_ops',
+      humanRoute(ctx.pendingRoute),
       ['employee-requested', ...(ctx.pendingTags ?? [])],
       ctx.pendingConfidence ?? 0,
-      false,
+      wasSensitive,
       opts
     );
-    if (!ticket) return { turn: escalationFailedTurn(false), ctx: next };
-    return { turn: ticketTurn(ticket, false), ctx: next };
+    if (!ticket) return { turn: escalationFailedTurn(wasSensitive), ctx: next };
+    return { turn: ticketTurn(ticket, wasSensitive), ctx: next };
   }
 
   if (ctx.offeredEscalation && NEGATIVE.test(raw)) {
@@ -488,6 +577,21 @@ export async function respond(
     };
   }
 
+  // Two words at most, and not a question: "ok" is an acknowledgement, "ok but what about sick
+  // leave?" is a question that happens to start with one.
+  if (ACKNOWLEDGEMENT.test(raw) && raw.split(/\s+/).length <= 2 && !raw.endsWith('?')) {
+    return {
+      turn: {
+        content: "Anything else I can help with?",
+        decision: 'ack',
+        confidence: 1,
+        collectFeedback: false,
+        corrections: [],
+      },
+      ctx: next,
+    };
+  }
+
   // --- 4. Understand ----------------------------------------------------
   let result = understand(raw, opts.faqs, { alreadyClarified: !!ctx.pendingClarify });
 
@@ -506,8 +610,10 @@ export async function respond(
   }
 
   next.pendingQuery = raw;
-  next.pendingRoute = result.route;
-  next.pendingTags = result.tags;
+  // A soft sensitive topic overrides the ordinary route, so that if the employee takes up the
+  // offer below, the ticket goes to the HR Head confidentially and not the general queue.
+  next.pendingRoute = result.sensitiveTopic?.route ?? result.route;
+  next.pendingTags = result.sensitiveTopic?.tags ?? result.tags;
   next.pendingConfidence = result.confidence;
 
   // --- 5. Sensitive: route immediately, never queue ----------------------
@@ -530,7 +636,7 @@ export async function respond(
           (result.intent.answer ?? '') +
           (ticket
             ? ''
-            : "\n\n---\n\n**I could not file a ticket for this** — the ticket system isn't responding. Please contact **Priya Nair (HR Head)** or **Meera Iyer (HRBP)** directly so this is on record."),
+            : "\n\n---\n\n**I could not file a ticket for this** — the ticket system isn't responding. Please contact the **HR Ops Team** or your **HRBP** directly so this is on record."),
         decision: 'sensitive',
         confidence: 1,
         intentId: result.intent.id,
@@ -544,6 +650,33 @@ export async function respond(
     };
   }
 
+  // --- 5a-bis. An outright request for a ticket or a person ---------------
+  //
+  // Placed AFTER the sensitive branch, not before it. Sitting earlier, "i want to file a
+  // complaint under the posh policy" matched "file a complaint" and was filed as an ordinary
+  // hr_ops ticket — the harassment routing never ran, so a POSH complaint went to the general
+  // queue instead of the HR Head. Sensitive classification wins; this catches what is left.
+  //
+  // Still before retrieval, so the request is never scored as a policy question. `pendingRoute`
+  // carries a sensitive route forward: asked for a ticket one turn after reporting misconduct,
+  // this must not downgrade it.
+  if ((ESCALATION_REQUEST.test(raw) || WANTS_A_HUMAN.test(raw)) && !PROCESS_QUESTION.test(raw)) {
+    delete next.offeredEscalation;
+    const wasSensitive = (ctx.pendingTags ?? []).includes('sensitive');
+    const ticket = await raise(
+      // What they want a ticket about is what they said before, not the words "raise a ticket".
+      ctx.pendingQuery ?? ctx.lastQuery ?? raw,
+      'Employee explicitly asked for a ticket or a human',
+      humanRoute(ctx.pendingRoute),
+      ['employee-requested', ...(ctx.pendingTags ?? [])],
+      ctx.pendingConfidence ?? 0,
+      wasSensitive,
+      opts
+    );
+    if (!ticket) return { turn: escalationFailedTurn(wasSensitive), ctx: next };
+    return { turn: ticketTurn(ticket, wasSensitive), ctx: next };
+  }
+
   // --- 5b. The employee's own records ------------------------------------
   //
   // Before retrieval, because no document can hold someone's leave balance. The
@@ -553,7 +686,8 @@ export async function respond(
     const action = await actionTurn(result.intent, result.confidence, result.corrections, opts);
     if (action) {
       next.lastIntentId = result.intent.id;
-      next.offeredEscalation = true;
+      // A records answer asks nothing. The employee can still escalate from the button.
+      next.offeredEscalation = false;
       return { turn: action, ctx: next };
     }
   }
@@ -572,7 +706,30 @@ export async function respond(
 
   if (grounded) {
     if (result.intent) next.lastIntentId = result.intent.id;
-    return { turn: grounded, ctx: { ...next, offeredEscalation: true } };
+
+    // A sensitive subject answered as a question: give them the policy, then name the
+    // confidential route without taking it for them. This is the whole point of the soft tier —
+    // guessing wrong here costs one sentence, where guessing wrong the other way sent an
+    // employee "I'm sorry you're dealing with this" and put a false incident on the HR Head's
+    // queue. `offeredEscalation` is set because this turn genuinely asks a question.
+    if (result.sensitiveTopic) {
+      return {
+        turn: {
+          ...grounded,
+          content:
+            grounded.content
+            + "\n\n---\n\nIf this is about something that happened to you or someone else, I can"
+            + " put you in touch with the **HR Head** confidentially instead — it stays out of the"
+            + " general HR queue and away from your manager. Just say **yes** and I'll arrange it.",
+          offerEscalation: true,
+        },
+        ctx: { ...next, offeredEscalation: true },
+      };
+    }
+
+    // Cleared, not merely left alone: an offer made two turns ago is stale once the question has
+    // been answered, so a later "ok" cannot reach back and accept it.
+    return { turn: grounded, ctx: { ...next, offeredEscalation: false } };
   }
 
   // --- 7. Ambiguous and unsupported: exactly one clarifying question ------
@@ -591,6 +748,29 @@ export async function respond(
   }
 
   // --- 8. Not in the corpus: hand over to a human ------------------------
+  //
+  // A sensitive subject we cannot answer gets the confidential desk named rather than HR Ops —
+  // but still only offered. Filing unasked is what produced SEN tickets for people who wanted
+  // to read the POSH policy.
+  if (result.sensitiveTopic) {
+    return {
+      turn: {
+        content:
+          "I don't have that policy in the documents I've been given, and I'd rather not"
+          + " paraphrase this one.\n\nIf this is about something that happened to you or someone"
+          + " else, I can put you in touch with the **HR Head** confidentially — it stays out of"
+          + " the general HR queue and away from your manager. Say **yes** and I'll arrange it."
+          + " Otherwise, **posh@leadsquared.com** will have the document itself.",
+        decision: 'escalate',
+        confidence: result.confidence,
+        offerEscalation: true,
+        collectFeedback: false,
+        corrections: result.corrections,
+      },
+      ctx: { ...next, offeredEscalation: true },
+    };
+  }
+
   return {
     turn: noCoverageTurn(result.confidence, result.corrections),
     ctx: { ...next, offeredEscalation: true },

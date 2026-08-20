@@ -1,10 +1,16 @@
 package com.leadsquared.hr.knowledge.web;
 
+import com.leadsquared.hr.knowledge.audit.LoginTracker;
+import com.leadsquared.hr.knowledge.iam.IamService;
+import com.leadsquared.hr.knowledge.model.LoginRecord;
+import com.leadsquared.hr.knowledge.model.Permissions;
 import com.leadsquared.hr.knowledge.security.AuthProperties;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import com.leadsquared.hr.knowledge.security.CurrentUser;
 import com.leadsquared.hr.knowledge.security.SecurityConfig;
@@ -40,6 +46,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/auth")
 public class AuthController {
 
+  private static final org.slf4j.Logger log =
+      org.slf4j.LoggerFactory.getLogger(AuthController.class);
+
   /**
    * Matches the registration key in application.yml and the last segment of the
    * registered callback URI. Those three have to agree.
@@ -51,14 +60,20 @@ public class AuthController {
 
   private final CurrentUser currentUser;
   private final AuthProperties props;
+  private final IamService iam;
+  private final LoginTracker logins;
   private final boolean ssoConfigured;
 
   public AuthController(
       CurrentUser currentUser,
       AuthProperties props,
+      IamService iam,
+      LoginTracker logins,
       ObjectProvider<ClientRegistrationRepository> clients) {
     this.currentUser = currentUser;
     this.props = props;
+    this.iam = iam;
+    this.logins = logins;
     this.ssoConfigured = clients.getIfAvailable() != null;
   }
 
@@ -78,7 +93,25 @@ public class AuthController {
        * page cannot offer a path the backend will refuse.
        */
       boolean localLoginEnabled,
-      SignedInUser user) {}
+      /**
+       * TEMPORARY — whether {@code POST /api/auth/dev} will sign this browser in while the Entra
+       * registration is pending. The login page points its Microsoft button at that endpoint when
+       * this is true, so there is one button to click either way and nothing to change back in the
+       * UI when the real flow arrives.
+       */
+      boolean devSignIn,
+      /** The address that bypass would sign in as, so the page can name it rather than surprise. */
+      String devSignInEmail,
+      SignedInUser user,
+      /**
+       * What this session may do, as {@code Permissions} keys.
+       *
+       * <p>Reported so the console can hide a section it has no access to rather than render it
+       * and collect a 403. It is not the control — every endpoint behind those sections is gated
+       * server-side and re-decided per request — so a client that ignores this list learns
+       * nothing it could not have guessed.
+       */
+      List<String> permissions) {}
 
   public record LocalLogin(String email, String password, String name) {}
 
@@ -112,6 +145,51 @@ public class AuthController {
     }
 
     SignedInUser user = currentUser.fromEmail(email, body.name());
+    establishSession(user, request, response);
+    logins.recordLogin(user.email(), user.name(), LoginRecord.LOCAL);
+
+    return ResponseEntity.ok(user);
+  }
+
+  /**
+   * TEMPORARY: sign in as the single account named by {@code hr.auth.dev-sign-in-as}, while the
+   * Entra app registration for this tenant is awaiting IT approval.
+   *
+   * <p>Note what this endpoint does <em>not</em> take: an email. The identity comes from
+   * configuration — a gitignored local file — never from the caller. That is the difference
+   * between standing in for Microsoft's assertion of who you are and letting anyone who can reach
+   * the API assert it themselves, which is the flaw {@code CurrentUser} exists to prevent.
+   *
+   * <p>Everything downstream is untouched: this produces an ordinary session, the role is resolved
+   * by the same rules Entra sign-in uses (IAM assignment, then {@code hr.auth.admin-emails}), and
+   * every endpoint re-decides authorization per request. The employee-data privacy rule is
+   * likewise unaffected — answers resolve against whatever record this address matches in the
+   * extract, exactly as they will for a real sign-in.
+   *
+   * <p>404 rather than 403 when the property is unset, so a deployment that never enabled this
+   * does not advertise that the route exists.
+   */
+  @PostMapping("/dev")
+  public ResponseEntity<?> devSignIn(HttpServletRequest request, HttpServletResponse response) {
+    String email = props.devSignInEmail();
+    if (email == null) {
+      return ResponseEntity.notFound().build();
+    }
+
+    SignedInUser user = currentUser.fromEmail(email, props.devSignInDisplayName());
+    establishSession(user, request, response);
+    // Recorded as its own method, not as `local`: the audit trail should show which of these
+    // sessions were asserted by Microsoft and which by a config line, and "the bypass was on
+    // between these dates" is the question someone will actually ask later.
+    logins.recordLogin(user.email(), user.name(), LoginRecord.DEV);
+
+    log.warn("Dev sign-in used for {} — Entra bypass is active on this instance.", user.email());
+    return ResponseEntity.ok(user);
+  }
+
+  /** Puts a resolved identity into a fresh session, for both non-Entra sign-in paths. */
+  private void establishSession(
+      SignedInUser user, HttpServletRequest request, HttpServletResponse response) {
 
     Authentication auth =
         new UsernamePasswordAuthenticationToken(
@@ -129,18 +207,44 @@ public class AuthController {
     SecurityContextHolder.setContext(context);
     new HttpSessionSecurityContextRepository()
         .saveContext(context, request, response);
-
-    return ResponseEntity.ok(user);
   }
 
   @GetMapping("/me")
   public Me me() {
     boolean enforced = props.shouldSecure(ssoConfigured);
+    SignedInUser user = currentUser.get().orElse(null);
+    String devEmail = props.devSignInEmail();
     return new Me(
-        currentUser.get().isPresent(),
+        user != null,
         enforced,
         enforced ? SecurityConfig.AUTHORIZATION_BASE_URI + "/" + REGISTRATION_ID : null,
         props.localLoginEnabled(ssoConfigured),
-        currentUser.get().orElse(null));
+        devEmail != null,
+        devEmail,
+        user,
+        permissionsFor(user));
+  }
+
+  /**
+   * The signed-in account's permissions, break-glass included.
+   *
+   * <p>An address in {@code hr.auth.admin-emails} holds the console without an IAM assignment, so
+   * reading roles alone would tell that account it has no access to a page it is about to open.
+   * The audit permission is granted the same way: an emergency admin who cannot see the audit
+   * trail cannot investigate the emergency.
+   */
+  private List<String> permissionsFor(SignedInUser user) {
+    if (user == null) return List.of();
+    if (props.admins().contains(user.email())) {
+      // Everything, and derived from the catalogue rather than listed here — this used to name
+      // its two permissions inline, which meant a new one would be enforced by PermissionChecker
+      // for these accounts while this method told the console they did not have it, hiding a tab
+      // they could in fact open. The break-glass list is all-or-nothing by design.
+      List<String> all = new ArrayList<>();
+      all.add(Permissions.ADMIN_CONSOLE);
+      all.addAll(Permissions.AREAS);
+      return List.copyOf(all);
+    }
+    return List.copyOf(iam.permissionsFor(Set.of(user.email())));
   }
 }

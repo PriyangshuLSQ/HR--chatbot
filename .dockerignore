@@ -1,0 +1,36 @@
+# Build context for the frontend image. Everything the Next build does not read
+# is excluded — this context would otherwise carry the 21 MB Qdrant storage dir
+# and a node_modules built against macOS binaries.
+
+# Installed in the image by pnpm, for linux. Copying the host's tree in would
+# shadow that with darwin-arm64 builds and break the build non-obviously.
+node_modules
+.next
+.nlu-build
+tsconfig.tsbuildinfo
+
+# The Java service has its own image and its own context (backend/Dockerfile).
+backend
+
+# Real HR documents, their embeddings, and the legacy corpus. Mounted into the
+# backend at runtime; never baked into an image.
+data
+
+.git
+.gitignore
+.claude
+.vercel
+.DS_Store
+
+# Secrets. Neither belongs in an image layer.
+.env
+.env*.local
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.override.yml
+
+*.md
+docs
+samples

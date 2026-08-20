@@ -20,7 +20,7 @@ server:
 
 spring:
   application:
-    name: hr-knowledge-backend
+    name: hr-chatbot-robin-backend
   # The Atlas connection string carries a password, so it lives in
   # `application-local.yml` (gitignored) rather than here. `optional:` keeps the
   # service bootable without it — Mongo just fails on first use, and the rest of
@@ -38,8 +38,11 @@ spring:
     multipart:
       # Per-file cap is enforced in the controller so one oversized file in a
       # batch reports a readable error instead of failing the whole request.
-      max-file-size: 12MB
-      max-request-size: 120MB
+      # These sit above KnowledgeController.MAX_BYTES (15 MB) at the ratios they always had: the
+      # file limit 1.2x the app's cap, so the readable error is the one an admin sees, and the
+      # request limit ten times that so a batch of large files is not rejected wholesale.
+      max-file-size: 18MB
+      max-request-size: 180MB
   jackson:
     # `hint`, `model` and `warning` are optional on the TypeScript side, and the
     # admin console tests them for truthiness — emitting them as null is fine and
@@ -217,7 +220,16 @@ knowledge:
     # Hard cap per upload. A 200-slide deck saved as .docx would otherwise be 200 vision
     # calls inside one HTTP request. Images past the cap are reported as skipped, not
     # silently dropped.
-    max-images-per-document: ${OCR_MAX_IMAGES:12}
+    #
+    # 100, not 12: a scanned policy is one image per page, so the old cap quietly truncated any
+    # scan longer than twelve pages — the upload succeeded, the note said images were skipped,
+    # and the back half of the document was simply absent from the knowledge base. Concurrency is
+    # bounded separately at 8 in flight (ClaudeVisionClient.OCR_CONCURRENCY), which is what stops
+    # a long document turning into rate-limit failures instead of a slightly longer wait.
+    #
+    # Budget at the cap: ~13 waves of 8, so about a minute of OCR and roughly 60 cents. The 15 MB
+    # per-file limit is usually the tighter one for scans — 100 pages only fit at ~150 KB a page.
+    max-images-per-document: ${OCR_MAX_IMAGES:100}
     # Images below this are skipped unread. Logos, bullet glyphs and signature squiggles
     # are the bulk of images in a policy document and none carry text worth indexing;
     # paying a vision call to discover that on every upload is waste.

@@ -141,6 +141,61 @@ export async function removeIamUser(email: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Audit trail and sign-ins — HR Ops Admin only
+// ---------------------------------------------------------------------------
+
+/** One administrative action. Mirrors `AdminAuditEvent`. */
+export interface AuditEvent {
+  id: string;
+  at: string;
+  /** The signed-in email that performed it, or `unknown` if there was no session. */
+  actor: string;
+  /** A stable key: `policy.uploaded`, `access.granted`, and so on. */
+  action: string;
+  target: string;
+  detail: string;
+}
+
+export interface AuditResponse {
+  events: AuditEvent[];
+  /** The action keys the server recognises, so the filter cannot offer a dead option. */
+  actions: string[];
+}
+
+export async function fetchAudit(action?: string): Promise<AuditResponse> {
+  const query = action ? `?action=${encodeURIComponent(action)}` : '';
+  return json<AuditResponse>(await fetch(`/api/admin/audit${query}`, { cache: 'no-store' }));
+}
+
+/** One account's sign-in history, collapsed to a row. Mirrors `LoginRecord`. */
+export interface LoginRecord {
+  id: string;
+  email: string;
+  name: string;
+  /** Present when the HR extract knows this address; null for joiners and admin accounts. */
+  employeeCode: string | null;
+  firstLoginAt: string;
+  lastLoginAt: string;
+  loginCount: number;
+  method: string;
+}
+
+export async function fetchLogins(): Promise<{ logins: LoginRecord[] }> {
+  return json<{ logins: LoginRecord[] }>(await fetch('/api/admin/logins', { cache: 'no-store' }));
+}
+
+/** What the console calls each action. Unknown keys fall back to the key itself. */
+export const AUDIT_ACTION_LABELS: Record<string, string> = {
+  'policy.uploaded': 'Policy uploaded',
+  'policy.deleted': 'Policy deleted',
+  'knowledge.reindexed': 'Knowledge re-indexed',
+  'access.granted': 'Access granted',
+  'access.changed': 'Access changed',
+  'access.revoked': 'Access revoked',
+  'role.updated': 'Role edited',
+};
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

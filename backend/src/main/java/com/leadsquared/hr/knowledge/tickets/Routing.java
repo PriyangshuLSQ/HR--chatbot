@@ -30,8 +30,8 @@ public final class Routing {
   static String assigneeFor(String route) {
     return switch (route) {
       case "hr_ops" -> "HR Ops Queue";
-      case "hrbp" -> "Meera Iyer (HRBP)";
-      case "hr_head" -> "Priya Nair (HR Head)";
+      case "hrbp" -> "HRBP Team";
+      case "hr_head" -> "HR Ops Team";
       default -> "Unassigned";
     };
   }

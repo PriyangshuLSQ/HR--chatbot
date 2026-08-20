@@ -34,7 +34,6 @@ export interface NewTicketBody {
   tags: string[];
   confidence: number;
   transcript: { role: 'user' | 'bot'; text: string }[];
-  channel: string;
 }
 
 export async function fetchTickets(): Promise<Ticket[]> {
@@ -77,7 +76,6 @@ export interface NewFeedbackBody {
   intentLabel?: string;
   query: string;
   confidence: number;
-  channel: string;
 }
 
 export async function fetchFeedback(): Promise<Feedback[]> {

@@ -598,37 +598,9 @@
 }
 
 /*
- * An equaliser for the phase with nothing to show yet.
- *
- * Five bars rather than three dots, because dots are what every chat window uses to
- * mean "a person is typing" — and nobody is typing. Something is being searched and
- * then composed, and a moving level reads as work happening rather than as a person
- * pausing mid-sentence.
- *
- * Animated with scaleY rather than height so it stays on the compositor: this runs
- * for the eight or nine seconds retrieval and prompt evaluation take, and a layout
- * animation for that long is a long time to be recalculating the transcript.
+ * The equaliser that used to fill the waiting phase is gone — both phases now read as one
+ * shimmering word, "Thinking" then "Writing", via .activity-shimmer above.
  */
-.wave-bars {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 14px;
-}
-
-.wave-bar {
-  width: 3px;
-  height: 14px;
-  border-radius: 2px;
-  transform-origin: bottom center;
-  background: linear-gradient(180deg, #7c5cff 0%, var(--primary) 100%);
-  animation: waveRise 1.05s ease-in-out infinite;
-}
-
-@keyframes waveRise {
-  0%, 100% { transform: scaleY(0.26); opacity: 0.5; }
-  50% { transform: scaleY(1); opacity: 1; }
-}
 @keyframes growBar {
   from { transform: scaleY(0); }
   to { transform: scaleY(1); }
@@ -904,12 +876,6 @@ td:has(> .tabular),
   .activity-halo::after {
     animation: none;
     opacity: 0;
-  }
-
-  .wave-bar {
-    animation: none;
-    opacity: 0.7;
-    transform: scaleY(0.5);
   }
 
   .typing-caret-host .rich > :last-child::after,

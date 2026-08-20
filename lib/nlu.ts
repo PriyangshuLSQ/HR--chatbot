@@ -70,10 +70,33 @@ export interface NluCandidate {
   confidence: number;
 }
 
+/**
+ * A sensitive subject came up without anything to suggest an incident.
+ *
+ * The soft half of sensitive detection. "What is posh?" is the policy's name and nothing else —
+ * no act, no first-person account — so it is answered from the documents like any other question,
+ * with the confidential route offered alongside rather than taken on the employee's behalf.
+ *
+ * This exists because the binary version could not be made reliable. Three rounds of widening a
+ * keyword rule ("tell me about posh policy", then "just tell me...", then "what is posh?") each
+ * ended with a real employee getting "I'm sorry you're dealing with this" and a confidential
+ * incident ticket on the HR Head's queue. Guessing wrong now costs one extra sentence.
+ */
+export interface SensitiveTopic {
+  intentId: string;
+  route: RouteTarget;
+  tags: string[];
+}
+
 export interface NluResult {
   decision: NluDecision;
   confidence: number;
   intent?: Intent;
+  /**
+   * Set when a sensitive subject was named but read as informational. The answer comes from the
+   * corpus; the caller is expected to offer the confidential route alongside it.
+   */
+  sensitiveTopic?: SensitiveTopic;
   /** Populated when decision === 'clarify' — always exactly one question. */
   clarify?: { question: string; options: { label: string; intentId: string }[] };
   candidates: NluCandidate[];
@@ -132,6 +155,23 @@ const PHRASE_VOCAB = [
   'work', 'from', 'home', 'notice', 'period', 'sick', 'casual', 'slip',
   'time', 'off', 'day', 'days', 'form', 'provident', 'fund', 'report',
   'credited', 'length', 'serve', 'papers', 'money',
+];
+
+/**
+ * Words HR's documents use that no intent question happens to contain.
+ *
+ * The spell-check vocabulary is built from intent utterances and keywords only, so a real word
+ * absent from all of them is not merely unknown — it is *corrected away* into whichever intent
+ * word sits closest. "lease" became **"leave"** at edit distance 1, so every car-lease question
+ * was classified as a leave question and shown a baffling "Read as: lease → leave". Same shape as
+ * "montly" → "monday", which is why this list exists rather than another intent keyword: these
+ * words need to be known, not to pull a question toward a topic.
+ *
+ * The test for adding one: it appears in an uploaded policy, an employee would type it, and it is
+ * within an edit or two of something in the vocabulary.
+ */
+const DOCUMENT_VOCAB = [
+  'lease', 'leased', 'vehicle', 'entitlement', 'residual', 'perquisite', 'gratuity',
 ];
 
 /**
@@ -313,6 +353,26 @@ export const INTENTS: Intent[] = [
     answer:
       "Thanks for raising this — grievances are handled confidentially and I've escalated yours directly to your **HRBP**, bypassing the general queue.\n\n**What happens next:** your HRBP will contact you privately within **1 business day** to understand the details and agree on next steps with you before anything is actioned.\n\nNothing is shared with your reporting manager without your consent.",
   },
+  {
+    id: 'sensitive_misconduct',
+    domain: 'Employee Relations',
+    sensitive: true,
+    route: 'hr_head',
+    tags: ['sensitive', 'misconduct', 'urgent', 'confidential'],
+    keywords: ['misconduct', 'fraud', 'theft', 'malpractice'],
+    utterances: [
+      'someone is cheating in office',
+      'someone is stealing from the company',
+      'my colleague is faking his timesheet',
+      'there is fraud happening in my team',
+      'i want to report misconduct',
+      'someone is leaking client data',
+      'a teammate is falsifying expense claims',
+      'i think there is a conflict of interest',
+    ],
+    answer:
+      "Thank you for reporting this. Concerns like this are taken seriously and are not something I should try to answer from a policy document.\n\nI've routed it **directly to the HR Head** as a confidential matter — it does not go into the general HR queue, and it is not visible to your manager or to anyone named in it.\n\n**What happens next:** someone will contact you privately to understand what you have seen. You will not be asked to investigate anything yourself.\n\nReporting a concern in good faith is protected — retaliation for doing so is itself a disciplinary matter. If you would rather report anonymously, you can email **ethics@leadsquared.com** instead.",
+  },
 
   // ---------------- Darwinbox-backed, live data ---------------------------
   {
@@ -441,7 +501,14 @@ export const INTENTS: Intent[] = [
   {
     id: 'salary_date',
     domain: 'Payroll',
-    keywords: ['salary', 'date', 'day', 'month', 'payday', 'notcredited', 'payroll'],
+    // `monthly` is here for the spell-checker as much as for matching. The vocabulary is built
+    // from intent questions and keywords only — never from answers — and the word appeared in
+    // no question, so "montly" had no candidate at distance 1 and was corrected to `monday`
+    // (distance 2, same length, and a real vocabulary word from the holiday intent). The employee
+    // asking for their monthly salary was shown "Read as: montly → monday" and filed under
+    // Holiday calendar in the digest. Note the stemmer does not strip "ly", so this token stays
+    // `monthly` and is distinct from the `month` already listed.
+    keywords: ['salary', 'date', 'day', 'month', 'monthly', 'payday', 'notcredited', 'payroll'],
     utterances: [
       'when will i get my salary',
       'what date is payday',
@@ -462,6 +529,28 @@ export const INTENTS: Intent[] = [
       'tax saving declaration deadline',
       'why is so much tax deducted',
       'form 16 download',
+    ],
+  },
+  {
+    // Added because there was no vehicle topic at all, and `entitlement` is a `leave_policy`
+    // keyword: "what is the car lease entitlement value for the employee at grade x7" classified
+    // as Leave at 0.57 and the employee was asked whether they meant maternity leave or their
+    // leave balance. Nothing here answers the question — the figures come from the Car Lease
+    // Policy like every other policy answer — but classifying it correctly stops the leave menu
+    // and files it under Benefits in the digest.
+    //
+    // `grade` and `entitlement` are deliberately listed despite `entitlement` being shared with
+    // leave_policy: scoring is by overlap, so the vehicle words are what has to carry it.
+    id: 'car_lease',
+    domain: 'Benefits',
+    keywords: ['car', 'lease', 'vehicle', 'fuel', 'driver', 'grade', 'entitlement'],
+    utterances: [
+      'what is the car lease entitlement for my grade',
+      'am i eligible for the car lease scheme',
+      'how much vehicle value can i lease',
+      'fuel and driver salary reimbursement limits',
+      'car lease policy',
+      'what happens to my car lease if i resign',
     ],
   },
   {
@@ -788,6 +877,9 @@ export function buildModel(faqs: FAQ[] = []): void {
   // Keep unstemmed synonym keys spell-checkable too.
   for (const key of Object.keys(SYNONYMS)) VOCAB.add(key);
   for (const w of PHRASE_VOCAB) VOCAB.add(w);
+  // Known, but deliberately not added to DF: these carry no intent, so giving them document
+  // frequency would let "lease" pull a question toward whichever intent it landed in.
+  for (const w of DOCUMENT_VOCAB) VOCAB.add(w);
   builtFor = signature;
 }
 
@@ -803,6 +895,16 @@ export interface ParsedQuery {
   tokens: string[];
   bigrams: string[];
   normalized: string;
+  /**
+   * The same text before spell-correction ran.
+   *
+   * Kept because correction is a guess, and a wrong guess must not decide whether something is
+   * routed as a harassment report. "Is there posh training for new joiners" had "training"
+   * corrected to "tracking" — the nearest word in the domain vocabulary — which left the message
+   * naming no document, so it failed the policy-lookup test and was filed as an incident. Rules
+   * that gate routing consult both spellings.
+   */
+  raw: string;
   corrections: { from: string; to: string }[];
 }
 
@@ -814,8 +916,20 @@ export interface ParsedQuery {
  * intent. Among equal-distance candidates we prefer the one appearing in more
  * intents (higher document frequency), then the closer length.
  */
+/**
+ * Above this many words, a message is quoted text rather than a typed question, and correction is
+ * skipped wholesale. Forty is generous for something somebody types into a chat box and well under
+ * the length of any answer this assistant produces.
+ */
+const MAX_WORDS_TO_CORRECT = 40;
+
 function correctToken(token: string): string | null {
   if (token.length < 3 || VOCAB.has(token) || VOCAB.has(stem(token))) return null;
+  // Never a number. A digit string is data the employee typed, not a misspelling of a word, and
+  // "correcting" it silently changes a figure: an employee quoting a payout of 850 had it read as
+  // 80. In a conversation about pay that is the same class of failure as computing the wrong
+  // amount — the employee sees a number they did not write.
+  if (/\d/.test(token)) return null;
   const budget = token.length <= 5 ? 1 : 2;
   let best: string | null = null;
   let bestDist = budget + 1;
@@ -868,10 +982,23 @@ function correctToken(token: string): string | null {
 export function parseQuery(text: string): ParsedQuery {
   const corrections: { from: string; to: string }[] = [];
 
+  /*
+   * Spell correction is for a typed question, not for prose.
+   *
+   * The vocabulary is a few hundred HR words, so every ordinary English word outside it is a
+   * candidate for "correction": pasting an earlier answer back to ask a follow-up produced
+   * "actual → annual, times → time, reduce → deduct, stated → status, revise → review" and a
+   * question that no longer said what the employee wrote. A typed question carries a typo or two;
+   * a message this long is quoted text, and guessing at it does more harm than leaving it alone.
+   */
+  const wordCount = normalizeBase(text).split(' ').filter(Boolean).length;
+  const skipCorrection = wordCount > MAX_WORDS_TO_CORRECT;
+
   const corrected = normalizeBase(text)
     .split(' ')
     .filter(Boolean)
     .map((w) => {
+      if (skipCorrection) return w;
       if (STOPWORDS.has(w)) return w;
       const fixed = correctToken(w);
       if (fixed && fixed !== w) {
@@ -891,7 +1018,13 @@ export function parseQuery(text: string): ParsedQuery {
     .map(canonical)
     .filter((w) => w.length > 1);
 
-  return { tokens, bigrams: bigramsOf(tokens), normalized, corrections };
+  return {
+    tokens,
+    bigrams: bigramsOf(tokens),
+    normalized,
+    raw: applyPhrases(normalizeBase(text)),
+    corrections,
+  };
 }
 
 function scoreIntent(q: ParsedQuery, model: IntentModel): number {
@@ -967,9 +1100,49 @@ function scoreIntent(q: ParsedQuery, model: IntentModel): number {
  */
 const PROTECTED_RE =
   /\b(religion|religious|caste|race|racial|ethnic|ethnicity|gender|sexual|disability|disabled|orientation|marital|pregnan\w*|nationality)\b/;
-/** Unambiguous harassment language, without needing the word itself. */
-const HARASSMENT_RE =
-  /\b(harass\w*|assault\w*|molest\w*|stalk\w*|inappropriate\s+(touch\w*|behaviou?r|advances?|messages?)|touched\s+me|unsafe|posh)\b/;
+/**
+ * Acts, not subjects. None of these is the name of a document, so they route on sight.
+ */
+const HARASSMENT_ACT_RE =
+  /\b(assault\w*|molest\w*|stalk\w*|inappropriate\s+(touch\w*|behaviou?r|advances?|messages?)|touched\s+me|unsafe)\b/;
+
+/**
+ * Words that name the subject as readily as they describe an incident.
+ *
+ * POSH is the policy's name. "Tell me about posh policy?" was answered with "I'm sorry you're
+ * dealing with this", routed to the HR Head as a confidential priority matter, and never
+ * produced the policy — an employee doing their required reading was handled as a victim, and a
+ * false incident landed on the most sensitive queue in the company. "Harassment" and
+ * "discrimination" carry the same double duty: every company has a document with those words in
+ * the title. These route unless the message is plainly a request to read that document.
+ */
+const HARASSMENT_TOPIC_RE = /\b(harass\w*|discriminat\w*|posh)\b/;
+
+/**
+ * Marks a message as being about the sender's own experience, or their intent to report.
+ *
+ * This is the whole hard/soft discriminator now. Two earlier attempts tried to recognise the
+ * opposite — a question asking to be told something — by anchoring on an opening cue and
+ * requiring a document noun. Both failed on ordinary phrasing ("just tell me...", "what is
+ * posh?") because there is no finite list of ways to ask a question. There is a much smaller
+ * set of ways to say something happened to you, so that is what gets matched, and everything
+ * else is treated as a question with the confidential route offered alongside.
+ *
+ * Deliberately generous: a hit here only means the confidential route is taken rather than
+ * offered, and that is the safe direction.
+ */
+const DISCLOSURE_RE = new RegExp(
+  '\\b('
+    // "i am looking for the policy" is a question, so the state-of-being forms exclude searching.
+    + "i\\s+am(?!\\s+(?:looking|searching|trying))|i'm|im\\s"
+    + '|i\\s+was|i\\s+have|i\\s+feel|i\\s+faced'
+    // "i want to report this" discloses; "i want to know about this" asks. Same three words.
+    + '|i\\s+(?:want|need|wish)\\s+to\\s+(?!know|read|understand|see|learn|check|find)'
+    + '|happened\\s+to\\s+me|against\\s+me|about\\s+me|harass\\w*\\s+me|touch\\w*\\s+me'
+    + '|my\\s+(manager|lead|boss|supervisor|colleague|coworker|co-worker|teammate|senior|hod|team)'
+    + '|report\\w*|complain\\w*|victim|witness\\w*|experienc\\w*|suffer\\w*|facing'
+    + ')\\b'
+);
 
 /** Someone with power over the employee. Grievances are about these people. */
 const AUTHORITY_RE =
@@ -979,20 +1152,61 @@ const AUTHORITY_RE =
 const ABUSE_RE =
   /\b(threat\w*|bully\w*|bullied|abus\w*|shout\w*|yell\w*|scream\w*|insult\w*|humiliat\w*|retaliat\w*|intimidat\w*|hostile|toxic|verbally)\b/;
 
+/**
+ * Dishonesty reported about someone else — theft, fraud, falsified records, data leaks.
+ *
+ * A separate list from ABUSE_RE because the shape of the report is different: the employee is
+ * usually not the victim, so none of the mistreatment vocabulary appears. "Some one is cheating
+ * in office" was scored as a work-from-home question at 45%, answered from the corpus, and no
+ * ticket was raised — a misconduct report silently became a policy answer.
+ */
+const MISCONDUCT_RE =
+  /\b(cheat\w*|steal\w*|stole|stolen|theft|thief|fraud\w*|embezzl\w*|bribe\w*|briber\w*|kickback|forge\w*|forged|falsif\w*|fabricat\w*|fak(e|ed|ing)|misappropriat\w*|misconduct|malpractice|corrupt\w*|conflict\s+of\s+interest|insider\s+trading|leak\w*)\b/;
+
+/**
+ * Someone other than the employee, or the act of reporting.
+ *
+ * MISCONDUCT_RE alone is not enough: "what does the policy say about fraud" is a legitimate
+ * policy question and must still be answered from the documents. What makes it a report is a
+ * subject who did it, or the employee saying they want to report it.
+ */
+const THIRD_PARTY_RE =
+  /\b(someone|some\s?one|somebody|anyone|colleague|coworker|co-worker|teammate|manager|supervisor|boss|lead|employee|staff|team|vendor|contractor)\b/;
+
+const REPORTING_RE =
+  /\b(report\w*|complain\w*|whistle\s?blow\w*|escalate|raise|inform|tell\s+(hr|someone))\b/;
+
 const MISTREAT_RE =
   /\b(singled|unfair\w*|different\w*|denied|deny|excluded?|bias\w*|prejudice\w*|favourit\w*|favorit\w*|targeted|mock\w*|insult\w*|slur\w*|remarks?|comments?|overlooked|humiliat\w*|belittl\w*|passed\s+over)\b/;
 
-/** Sensitive matters are detected before any confidence threshold applies. */
-function detectSensitive(q: ParsedQuery): Intent | null {
+/**
+ * Sensitive matters are detected before any confidence threshold applies.
+ *
+ * @returns {@code hard: true} to route immediately and file confidentially — an act described,
+ *     an inference from a protected attribute plus mistreatment, or a sensitive subject named
+ *     alongside the sender's own experience. {@code hard: false} means the subject came up with
+ *     no sign of an incident: answer it from the documents and offer the route.
+ */
+function detectSensitive(q: ParsedQuery): { intent: Intent; hard: boolean } | null {
   const tokenSet = new Set(q.tokens);
   const text = q.normalized;
 
-  const inferredDiscrimination = PROTECTED_RE.test(text) && MISTREAT_RE.test(text);
-  const hasHarassment =
-    tokenSet.has('harassment')
-    || tokenSet.has('discrimination')
-    || HARASSMENT_RE.test(text)
-    || inferredDiscrimination;
+  // Both spellings, always. Spell-correction is a guess against a small domain vocabulary, and
+  // it must not be the thing that decides how a message is routed — see ParsedQuery.raw.
+  const either = (re: RegExp) => re.test(text) || re.test(q.raw);
+
+  const inferredDiscrimination = either(PROTECTED_RE) && either(MISTREAT_RE);
+
+  // Says something happened, or that the sender means to report it.
+  const discloses = either(DISCLOSURE_RE);
+
+  // An act named is a report whatever else the sentence contains — nobody describes being
+  // touched inappropriately as a way of asking for a document.
+  const hasHarassment = either(HARASSMENT_ACT_RE) || inferredDiscrimination;
+
+  // The subject alone. Sensitive when the sender is talking about themselves, a question
+  // otherwise: "what is posh?" names the policy and nothing more.
+  const namesTheSubject = either(HARASSMENT_TOPIC_RE);
 
   // Someone reporting mistreatment rarely uses the word "grievance". This has to
   // catch how it is actually said — "my manager is threatening me", "my lead
@@ -1006,8 +1220,28 @@ function detectSensitive(q: ParsedQuery): Intent | null {
     || tokenSet.has('complaint')
     || (AUTHORITY_RE.test(text) && (MISTREAT_RE.test(text) || ABUSE_RE.test(text)));
 
-  if (hasHarassment) return INTENTS.find((i) => i.id === 'sensitive_harassment') ?? null;
-  if (hasGrievance) return INTENTS.find((i) => i.id === 'sensitive_grievance') ?? null;
+  // A report about someone else's dishonesty. Requires the act AND either a subject or the
+  // employee saying they are reporting it, so that a question about the fraud policy is still
+  // a question about the fraud policy.
+  const hasMisconduct =
+    either(MISCONDUCT_RE) && (either(THIRD_PARTY_RE) || either(REPORTING_RE));
+
+  const hard = (id: string) => {
+    const intent = INTENTS.find((i) => i.id === id);
+    return intent ? { intent, hard: true } : null;
+  };
+
+  if (hasHarassment || (namesTheSubject && discloses)) return hard('sensitive_harassment');
+  if (hasGrievance) return hard('sensitive_grievance');
+  if (hasMisconduct) return hard('sensitive_misconduct');
+
+  // Soft: the subject was raised with nothing to suggest an incident. Answered from the
+  // documents, with the confidential route offered rather than taken.
+  if (namesTheSubject) {
+    const intent = INTENTS.find((i) => i.id === 'sensitive_harassment');
+    return intent ? { intent, hard: false } : null;
+  }
+
   return null;
 }
 
@@ -1064,6 +1298,7 @@ const INTENT_LABELS: Record<string, string> = {
   salary_date: 'When salary is credited',
   tax_form16: 'Tax / Form 16',
   insurance_benefits: 'Health insurance & benefits',
+  car_lease: 'Car lease scheme',
   expense_status: 'Status of my expense claim',
   expense_submit: 'How to claim an expense',
   asset_status: 'Status of my asset request',
@@ -1094,24 +1329,38 @@ export function understand(
   buildModel(faqs);
   const q = parseQuery(text);
 
+  const sensitive = detectSensitive(q);
+
+  // A soft match rides along on every return path below rather than short-circuiting: the
+  // question is answered normally, and the caller offers the confidential route beside the
+  // answer. Carried in `base` so no branch can forget it.
+  const soft: SensitiveTopic | undefined =
+    sensitive && !sensitive.hard
+      ? {
+          intentId: sensitive.intent.id,
+          route: sensitive.intent.route ?? 'hrbp',
+          tags: sensitive.intent.tags ?? ['sensitive'],
+        }
+      : undefined;
+
   const base = {
     candidates: [] as NluCandidate[],
     normalizedQuery: q.normalized,
     corrections: q.corrections,
+    sensitiveTopic: soft,
   };
 
-  // 1. Sensitive topics short-circuit everything.
-  const sensitive = detectSensitive(q);
-  if (sensitive) {
+  // 1. A reported incident short-circuits everything.
+  if (sensitive && sensitive.hard) {
     return {
       ...base,
       decision: 'sensitive',
       confidence: 1,
-      intent: sensitive,
-      candidates: [{ intent: sensitive, confidence: 1 }],
+      intent: sensitive.intent,
+      candidates: [{ intent: sensitive.intent, confidence: 1 }],
       action: 'none',
-      route: sensitive.route ?? 'hrbp',
-      tags: sensitive.tags ?? ['sensitive'],
+      route: sensitive.intent.route ?? 'hrbp',
+      tags: sensitive.intent.tags ?? ['sensitive'],
     };
   }
 

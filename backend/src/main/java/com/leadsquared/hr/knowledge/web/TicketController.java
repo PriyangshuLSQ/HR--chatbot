@@ -2,7 +2,9 @@ package com.leadsquared.hr.knowledge.web;
 
 import com.leadsquared.hr.knowledge.model.Ticket;
 import com.leadsquared.hr.knowledge.model.TicketComment;
+import com.leadsquared.hr.knowledge.model.Permissions;
 import com.leadsquared.hr.knowledge.security.CurrentUser;
+import com.leadsquared.hr.knowledge.security.PermissionChecker;
 import com.leadsquared.hr.knowledge.security.SignedInUser;
 import com.leadsquared.hr.knowledge.tickets.TicketService;
 import java.util.List;
@@ -29,10 +31,13 @@ public class TicketController {
 
   private final TicketService tickets;
   private final CurrentUser currentUser;
+  private final PermissionChecker permissions;
 
-  public TicketController(TicketService tickets, CurrentUser currentUser) {
+  public TicketController(
+      TicketService tickets, CurrentUser currentUser, PermissionChecker permissions) {
     this.tickets = tickets;
     this.currentUser = currentUser;
+    this.permissions = permissions;
   }
 
   public record TicketList(List<Ticket> tickets) {}
@@ -51,8 +56,17 @@ public class TicketController {
     // No user at all means sign-in is not configured (the open chain); behave as
     // this endpoint did before, rather than returning an empty queue that would
     // look like "no escalations" on the dashboard.
-    if (user == null || user.isAdmin()) {
-      return new TicketList(tickets.list());
+    if (user == null) return new TicketList(tickets.list());
+
+    // The queue, for whoever was granted the queue. Two permissions rather than one because the
+    // confidential escalations are the reason the console used to be an all-or-nothing grant:
+    // letting somebody work the ordinary queue had to mean handing them every harassment report
+    // as well. Filtered here rather than by URL — employees read their own escalations from this
+    // same endpoint, so there is no path that separates the two.
+    if (permissions.has(user, Permissions.ADMIN_TICKETS)) {
+      boolean sensitive = permissions.has(user, Permissions.ADMIN_TICKETS_SENSITIVE);
+      return new TicketList(
+          tickets.list().stream().filter(t -> sensitive || !t.confidential()).toList());
     }
 
     String email = user.email();
@@ -90,8 +104,7 @@ public class TicketController {
                         body.sensitive(),
                         body.tags(),
                         body.confidence(),
-                        body.transcript(),
-                        body.channel()))
+                        body.transcript()))
             .orElse(body);
 
     return ResponseEntity.status(HttpStatus.CREATED).body(tickets.create(attributed));
@@ -137,7 +150,7 @@ public class TicketController {
     // Same reasoning as above: an unreadable ticket is reported as absent.
     if (ticket == null || !mayRead(ticket)) return notFound();
 
-    boolean asHr = user == null || user.isAdmin();
+    boolean asHr = isHr();
     String role = asHr ? TicketComment.HR : TicketComment.EMPLOYEE;
 
     return tickets
@@ -187,13 +200,23 @@ public class TicketController {
    */
   private boolean isHr() {
     SignedInUser user = currentUser.get().orElse(null);
-    return user == null || user.isAdmin();
+    return user == null || permissions.has(user, Permissions.ADMIN_TICKETS);
   }
 
+  /**
+   * Whether this caller may see this one escalation.
+   *
+   * <p>Mirrors {@link #list()} deliberately. A per-row filter on the collection and a laxer check
+   * on the single-item route is the standard way a confidential record leaks: it never appears in
+   * the queue, and it is readable to anyone who guesses the id.
+   */
   private boolean mayRead(Ticket ticket) {
     SignedInUser user = currentUser.get().orElse(null);
-    if (user == null || user.isAdmin()) return true;
-    return ticket.isOwnedBy(user.email());
+    if (user == null) return true;
+    if (ticket.isOwnedBy(user.email())) return true;
+    if (!permissions.has(user, Permissions.ADMIN_TICKETS)) return false;
+    return !ticket.confidential()
+        || permissions.has(user, Permissions.ADMIN_TICKETS_SENSITIVE);
   }
 
   private static ResponseEntity<?> notFound() {

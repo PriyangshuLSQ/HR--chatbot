@@ -1,0 +1,19 @@
+# Build context for the Java service. Maven inside the image resolves its own
+# dependencies and compiles from src/, so nothing built on the host is wanted.
+
+# Host build output, including a jar compiled by a different JDK.
+target
+
+# The Node implementation this service replaced. Kept in the repo for reference,
+# not compiled by Maven, and not wanted in the context.
+legacy-node-impl
+
+# Atlas connection string, Entra client secret. Supplied as environment
+# variables at run time — see docker-compose.yml — and never copied into a layer,
+# where it would survive in the image history.
+application-local.yml
+
+.git
+.DS_Store
+Dockerfile
+.dockerignore

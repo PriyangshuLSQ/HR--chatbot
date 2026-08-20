@@ -24,8 +24,7 @@ public class FeedbackService {
       String intentId,
       String intentLabel,
       String query,
-      double confidence,
-      String channel) {}
+      double confidence) {}
 
   public List<Feedback> list() {
     return feedback.findAllByOrderByCreatedAtDesc();
@@ -69,8 +68,7 @@ public class FeedbackService {
             blankToNull(input.intentLabel()),
             input.query() == null ? "" : input.query(),
             input.confidence(),
-            Instant.now().toString(),
-            input.channel() == null ? "HR Portal" : input.channel()));
+            Instant.now().toString()));
   }
 
   private static String blankToNull(String s) {

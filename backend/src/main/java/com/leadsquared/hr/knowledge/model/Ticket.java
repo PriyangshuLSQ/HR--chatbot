@@ -46,7 +46,6 @@ public record Ticket(
     double confidence,
     List<TranscriptTurn> transcript,
     boolean confidential,
-    String channel,
     List<TicketComment> comments) {
 
   /** Never null, so callers and templates do not each need their own guard. */
@@ -57,13 +56,13 @@ public record Ticket(
   public Ticket withStatus(String next) {
     return new Ticket(
         id, query, reason, raisedBy, raisedByName, createdAt, next, priority, route, assignee,
-        tags, confidence, transcript, confidential, channel, comments);
+        tags, confidence, transcript, confidential,comments);
   }
 
   public Ticket withComments(List<TicketComment> next) {
     return new Ticket(
         id, query, reason, raisedBy, raisedByName, createdAt, status, priority, route, assignee,
-        tags, confidence, transcript, confidential, channel, next);
+        tags, confidence, transcript, confidential,next);
   }
 
   /** Whether this address raised the ticket. Case-insensitive; false for a null. */

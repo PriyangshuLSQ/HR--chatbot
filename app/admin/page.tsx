@@ -31,19 +31,46 @@ import {
   type TicketComment,
   type TicketStatus,
 } from '@/lib/hr-store';
-import { useChatbotAuth } from '@/lib/chatbot-auth';
+import {
+  ADMIN_ACCESS,
+  ADMIN_AUDIT,
+  ADMIN_DIGEST,
+  ADMIN_KNOWLEDGE,
+  ADMIN_PAYROLL,
+  ADMIN_TICKETS,
+  useChatbotAuth,
+} from '@/lib/chatbot-auth';
+import { useTheme } from '@/lib/theme';
+import {
+  bandFor,
+  fetchVariablePayPlan,
+  saveVariablePayPlan,
+  type Band,
+  type VariablePayPlan,
+} from '@/lib/variable-pay-api';
+import {
+  fetchFunctionPayPlans,
+  saveFunctionPayPlan,
+  slabKindLabel,
+  type FunctionPayPlan,
+} from '@/lib/function-pay-api';
 import {
   ADMIN_CONSOLE,
   addIamUser,
   createRole,
   deleteRole,
+  fetchAudit,
   fetchIamUsers,
+  fetchLogins,
   fetchRoles,
   removeIamUser,
   setIamUserRoles,
   slugify,
   updateRole,
+  AUDIT_ACTION_LABELS,
+  type AuditEvent,
   type IamUser,
+  type LoginRecord,
   type PermissionDefinition,
   type Role,
 } from '@/lib/iam-api';
@@ -68,15 +95,52 @@ import {
   UploadIcon,
 } from '@/components/Icons';
 
-type Tab = 'overview' | 'tickets' | 'digest' | 'knowledge' | 'access';
+type Tab =
+  | 'overview'
+  | 'tickets'
+  | 'digest'
+  | 'knowledge'
+  | 'variablepay'
+  | 'access'
+  | 'audit'
+  | 'signins';
 
-const TABS: { id: Tab; label: string }[] = [
+/**
+ * `requires` names a permission the session must hold for the tab to appear.
+ *
+ * Presentation only — every endpoint behind these is gated server-side by `PermissionAccess` (or,
+ * for escalations, per row inside `TicketController`) and re-decided per request. Hiding a tab
+ * keeps someone from clicking into a guaranteed 403; it is not what stops them reading it.
+ *
+ * Overview carries none: reaching the console at all already means holding `admin.console`, and a
+ * landing page that refuses to render would make a valid grant look broken.
+ */
+const TABS: { id: Tab; label: string; requires?: string }[] = [
   { id: 'overview', label: 'Overview' },
-  { id: 'tickets', label: 'Escalations' },
-  { id: 'digest', label: 'Weekly digest' },
-  { id: 'knowledge', label: 'Knowledge base' },
-  { id: 'access', label: 'Access' },
+  { id: 'tickets', label: 'Escalations', requires: ADMIN_TICKETS },
+  { id: 'digest', label: 'Weekly digest', requires: ADMIN_DIGEST },
+  { id: 'knowledge', label: 'Knowledge base', requires: ADMIN_KNOWLEDGE },
+  { id: 'variablepay', label: 'Variable pay', requires: ADMIN_PAYROLL },
+  { id: 'access', label: 'Access', requires: ADMIN_ACCESS },
+  { id: 'audit', label: 'Audit trail', requires: ADMIN_AUDIT },
+  { id: 'signins', label: 'Sign-ins', requires: ADMIN_AUDIT },
 ];
+
+/**
+ * How wide the console is allowed to get.
+ *
+ * 1180 left about 370px of dead margin each side on a 1920 display — most of the screens this is
+ * actually used on — while the tables and the escalation list were the things being squeezed. It
+ * is still a cap rather than full width: prose needs a measure, and the paragraphs below carry
+ * their own `maxWidth` so widening the shell cannot stretch a sentence to 200 characters.
+ *
+ * One constant because the header, the tab strip and the main column have to agree; they were
+ * three separate copies of the same number.
+ */
+const SHELL_MAX = 1560;
+
+/** Gutter that grows with the viewport, so wide screens are not edge-to-edge. */
+const SHELL_PAD = 'clamp(1rem, 2.5vw, 2.25rem)';
 
 /** Deterministic weekday volume fixture — swap for real telemetry. */
 const VOLUME = [
@@ -91,7 +155,10 @@ const VOLUME = [
 
 export default function AdminPage() {
   const router = useRouter();
-  const { user, isLoading: authLoading, ssoEnabled } = useChatbotAuth();
+  const { user, isLoading: authLoading, ssoEnabled, permissions } = useChatbotAuth();
+
+  // Tabs this session is allowed to see. A tab with no `requires` is open to any admin.
+  const visibleTabs = TABS.filter((t) => !t.requires || permissions.includes(t.requires));
 
   // The escalation queue holds confidential matters, so this page is admin-only.
   // The backend enforces it too — every /api route behind this console is gated by
@@ -111,7 +178,7 @@ export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('overview');
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [faqs] = useState<FAQ[]>(DEFAULT_FAQS);
-  const [theme, setTheme] = useState<'light' | 'dark' | null>(null);
+  const { theme, toggleTheme } = useTheme();
   const [booted, setBooted] = useState(false);
   const [version, setVersion] = useState(0);
   /** Set when the ticket store could not be reached — shown as a banner. */
@@ -121,13 +188,21 @@ export default function AdminPage() {
   const [kb, setKb] = useState<KnowledgeSnapshot | null>(null);
   const [ai, setAi] = useState<AiStatus | null>(null);
 
+  const canKnowledge = permissions.includes(ADMIN_KNOWLEDGE);
+
   const refreshKnowledge = useCallback(async () => {
+    // Not a permission check that protects anything — the endpoint refuses on its own. It stops
+    // this page issuing a request it knows will 403 on every load for someone who was granted
+    // the escalation queue and nothing else, and stops the overview reporting "0 documents" when
+    // the truth is "not yours to see".
+    if (!canKnowledge) return;
+
     // Settled rather than all: a stalled Ollama probe must not blank out the
     // document list, which is served from disk and always available.
     const [snapshot, status] = await Promise.allSettled([fetchKnowledge(), fetchAiStatus()]);
     if (snapshot.status === 'fulfilled') setKb(snapshot.value);
     if (status.status === 'fulfilled') setAi(status.value);
-  }, []);
+  }, [canKnowledge]);
 
   useEffect(() => {
     void refreshKnowledge();
@@ -154,12 +229,6 @@ export default function AdminPage() {
         setBooted(true);
       });
 
-    const stored = localStorage.getItem('hr_theme') as 'light' | 'dark' | null;
-    if (stored) {
-      setTheme(stored);
-      document.documentElement.setAttribute('data-theme', stored);
-    }
-
     return unsubscribe;
   }, []);
 
@@ -168,13 +237,6 @@ export default function AdminPage() {
 
   const openTickets = tickets.filter((t) => t.status !== 'resolved');
   const criticalOpen = openTickets.filter((t) => t.priority === 'critical');
-
-  const toggleTheme = () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('hr_theme', next);
-  };
 
   // After every hook, so the early return cannot change the hook order.
   if (accessDenied) return <AccessDenied email={user?.email ?? null} />;
@@ -192,9 +254,9 @@ export default function AdminPage() {
       >
         <div
           style={{
-            maxWidth: 1180,
+            maxWidth: SHELL_MAX,
             margin: '0 auto',
-            padding: '0.875rem 1.25rem',
+            padding: `0.875rem ${SHELL_PAD}`,
             display: 'flex',
             alignItems: 'center',
             gap: '0.75rem',
@@ -233,15 +295,15 @@ export default function AdminPage() {
         <nav
           className="scroll-slim"
           style={{
-            maxWidth: 1180,
+            maxWidth: SHELL_MAX,
             margin: '0 auto',
-            padding: '0 1.25rem',
+            padding: `0 ${SHELL_PAD}`,
             display: 'flex',
             gap: '0.25rem',
             overflowX: 'auto',
           }}
         >
-          {TABS.map((t) => {
+          {visibleTabs.map((t) => {
             const isActive = tab === t.id;
             return (
               <button
@@ -280,7 +342,13 @@ export default function AdminPage() {
         </nav>
       </header>
 
-      <main style={{ maxWidth: 1180, margin: '0 auto', padding: '1.5rem 1.25rem 3rem' }}>
+      <main
+        style={{
+          maxWidth: SHELL_MAX,
+          margin: '0 auto',
+          padding: `1.5rem ${SHELL_PAD} 3rem`,
+        }}
+      >
         {!booted ? (
           <div style={{ display: 'grid', gap: '1rem' }}>
             <div className="skeleton" style={{ height: 96 }} />
@@ -319,7 +387,15 @@ export default function AdminPage() {
             {tab === 'knowledge' && (
               <Knowledge faqs={faqs} kb={kb} ai={ai} onChanged={refreshKnowledge} />
             )}
+            {tab === 'variablepay' && (
+              <div style={{ display: 'grid', gap: '1rem' }}>
+                <VariablePayPlanPanel />
+                <FunctionPayPanel />
+              </div>
+            )}
             {tab === 'access' && <Access />}
+            {tab === 'audit' && <AuditTrail />}
+            {tab === 'signins' && <SignIns />}
           </>
         )}
         <div style={{ marginTop: '2rem' }}>
@@ -496,9 +572,23 @@ function Tickets({ tickets }: { tickets: Ticket[] }) {
         </p>
       )}
 
-      {rows.map((t) => (
-        <TicketRow key={t.id} ticket={t} />
-      ))}
+      {/*
+        Two columns once there is room for them. A single stack of full-width rows was the worst
+        use of a wide screen here: an escalation card is about 500px of content, so at 1560 each
+        row was mostly empty and the queue needed twice the scrolling to read.
+      */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(480px, 1fr))',
+          gap: '1rem',
+          alignItems: 'start',
+        }}
+      >
+        {rows.map((t) => (
+          <TicketRow key={t.id} ticket={t} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -603,10 +693,7 @@ function TicketRow({ ticket }: { ticket: Ticket }) {
           <dt className="label-caps">Raised by</dt>
           <dd>{ticket.raisedByName}</dd>
         </div>
-        <div>
-          <dt className="label-caps">Channel</dt>
-          <dd>{ticket.channel}</dd>
-        </div>
+        {/* Channel intentionally not shown — see DataCards. Still stored on the ticket. */}
       </dl>
 
       <p
@@ -821,6 +908,19 @@ function Digest({ digest }: { digest: ReturnType<typeof buildWeeklyDigest> | nul
         )}
       </section>
 
+      {/*
+        The two review panels sit side by side once there is room. They are read together — a
+        low-rated topic and the comment explaining why — so putting them on one screen saves
+        scrolling between them, and it fills width that stacking wasted.
+      */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+          gap: '1.25rem',
+          alignItems: 'start',
+        }}
+      >
       <section className="card" style={{ padding: '1.125rem' }}>
         <h3 style={{ fontSize: '0.9375rem', fontWeight: 700, marginBottom: '0.25rem' }}>
           Lowest-rated topics
@@ -879,6 +979,7 @@ function Digest({ digest }: { digest: ReturnType<typeof buildWeeklyDigest> | nul
           </ul>
         )}
       </section>
+      </div>
     </div>
   );
 }
@@ -887,7 +988,14 @@ function Digest({ digest }: { digest: ReturnType<typeof buildWeeklyDigest> | nul
 // Knowledge base
 // ---------------------------------------------------------------------------
 
-const CATEGORIES = [
+/**
+ * Starting suggestions, not an allowlist.
+ *
+ * The backend accepts any category string and only substitutes "General" when one is missing,
+ * so HR was never limited to these — the old `<select>` was the only thing enforcing them.
+ * They now seed a datalist alongside whatever categories the knowledge base already contains.
+ */
+const CATEGORY_SUGGESTIONS = [
   'Leave Management',
   'Payroll',
   'Benefits',
@@ -897,6 +1005,25 @@ const CATEGORIES = [
   'Exit',
   'General',
 ];
+
+/** Shared by both category inputs, so a new one typed in either place is suggested in the other. */
+const CATEGORY_LIST_ID = 'hr-category-suggestions';
+
+/**
+ * Suggestions plus every category already in use, de-duplicated case-insensitively.
+ *
+ * Showing what is already there is the point: free text without it invites "Insurance",
+ * "insurance" and "Medical Insurance" as three separate categories, and nothing downstream
+ * would notice them fragmenting.
+ */
+function categoryOptions(kb: KnowledgeSnapshot | null): string[] {
+  const seen = new Map<string, string>();
+  for (const value of [...CATEGORY_SUGGESTIONS, ...(kb?.docs ?? []).map((d) => d.category)]) {
+    const label = (value ?? '').trim();
+    if (label && !seen.has(label.toLowerCase())) seen.set(label.toLowerCase(), label);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
 
 function Knowledge({
   faqs,
@@ -910,9 +1037,17 @@ function Knowledge({
   onChanged: () => Promise<void>;
 }) {
   const [category, setCategory] = useState('Leave Management');
+  const options = categoryOptions(kb);
 
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
+      {/* One datalist for both inputs below. Native, so it stays keyboard- and
+          screen-reader-accessible without a custom combobox. */}
+      <datalist id={CATEGORY_LIST_ID}>
+        {options.map((c) => (
+          <option key={c} value={c} />
+        ))}
+      </datalist>
       <AiEnginePanel ai={ai} onChanged={onChanged} />
 
       <UploadZone category={category} onCategory={setCategory} onChanged={onChanged} />
@@ -1170,16 +1305,14 @@ function UploadZone({
 
       <label style={{ display: 'block', marginBottom: '0.875rem' }}>
         <span className="label-caps">Category</span>
-        <select
+        <input
           className="input"
           style={{ marginTop: '0.25rem', maxWidth: 280 }}
+          list={CATEGORY_LIST_ID}
           value={category}
+          placeholder="Pick one or type a new category"
           onChange={(e) => onCategory(e.target.value)}
-        >
-          {CATEGORIES.map((c) => (
-            <option key={c}>{c}</option>
-          ))}
-        </select>
+        />
       </label>
 
       <div
@@ -1230,7 +1363,7 @@ function UploadZone({
         >
           {busy
             ? 'Embedding can take a few seconds per document on a local model.'
-            : `${ACCEPTED_EXTENSIONS.join('  ·  ')}  ·  up to 10 MB each`}
+            : `${ACCEPTED_EXTENSIONS.join('  ·  ')}  ·  up to 15 MB each`}
         </p>
 
         <button
@@ -1387,16 +1520,14 @@ function AddEntryForm({
         </label>
         <label>
           <span className="label-caps">Category</span>
-          <select
+          <input
             className="input"
             style={{ marginTop: '0.25rem' }}
+            list={CATEGORY_LIST_ID}
             value={category}
+            placeholder="Pick one or type a new category"
             onChange={(e) => onCategory(e.target.value)}
-          >
-            {CATEGORIES.map((c) => (
-              <option key={c}>{c}</option>
-            ))}
-          </select>
+          />
         </label>
 
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1781,14 +1912,911 @@ function Access() {
         </div>
       )}
 
-      <UsersPanel
-        users={users}
-        roles={roles}
-        breakGlass={breakGlass}
-        signedInAs={signedInAs}
-        onChanged={reload}
+      {/*
+        People on the left, what the roles mean on the right — they are read together, since
+        assigning a role is the task and its definition is the reference for it. `auto-fit` with a
+        440px floor collapses them back to a stack below roughly 1140px, so nothing is squeezed on
+        a laptop.
+      */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(440px, 1fr))',
+          gap: '1.25rem',
+          alignItems: 'start',
+        }}
+      >
+        <UsersPanel
+          users={users}
+          roles={roles}
+          breakGlass={breakGlass}
+          signedInAs={signedInAs}
+          onChanged={reload}
+        />
+        <RolesPanel roles={roles} permissions={permissions} onChanged={reload} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail (HR Ops Admin)
+// ---------------------------------------------------------------------------
+
+/** Relative time, because "who changed this and when" is nearly always a recency question. */
+function timeAgo(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '—';
+
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function exactTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+}
+
+/** Access changes are the rows an admin is looking for, so they are tinted apart from uploads. */
+function actionTone(action: string): { fg: string; bg: string } {
+  if (action.startsWith('access.') || action.startsWith('role.')) {
+    return { fg: 'var(--primary)', bg: 'var(--primary-soft, var(--surface-2))' };
+  }
+  if (action === 'policy.deleted') {
+    return { fg: 'var(--error)', bg: 'var(--error-soft)' };
+  }
+  return { fg: 'var(--muted-foreground)', bg: 'var(--surface-2)' };
+}
+
+/**
+ * Every policy change and access change, newest first.
+ *
+ * Read-only, and deliberately so: there is no control here to clear or edit a row, because the
+ * people who can open this page are the people it records.
+ */
+// ---------------------------------------------------------------------------
+// Variable pay plan
+// ---------------------------------------------------------------------------
+
+/**
+ * The Variable Pay Policy as editable data.
+ *
+ * The figures that move most are at the top, because they are the ones somebody comes here to
+ * change: the company's achieved revenue and GRR, declared once a year. The bands, weightings and
+ * rating payouts below them change only between policy versions, but they are here rather than in
+ * a config file for the same reason — the policy reserves the right to revise any clause, and a
+ * number compiled into a build is a redeploy plus a chance of silently disagreeing with the PDF HR
+ * is reading from.
+ *
+ * Nothing here computes anyone's payout. The band previews are a courtesy so an entered figure
+ * shows its effect immediately; every payout an employee is told comes from the server, from the
+ * stored plan.
+ */
+function VariablePayPlanPanel() {
+  const [plan, setPlan] = useState<VariablePayPlan | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      setPlan(await fetchVariablePayPlan());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the variable pay plan.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const save = async () => {
+    if (!plan) return;
+    setSaving(true);
+    setError(null);
+    setSaved(null);
+    try {
+      const updated = await saveVariablePayPlan(plan);
+      setPlan(updated);
+      setSaved(`Saved ${new Date(updated.updatedAt).toLocaleString()}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the plan.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <section className="card" style={{ padding: '1.125rem' }}>Loading…</section>;
+  if (!plan) {
+    return (
+      <section className="card" style={{ padding: '1.125rem' }}>
+        <span style={{ color: 'var(--error-ink)' }}>{error ?? 'No plan available.'}</span>
+      </section>
+    );
+  }
+
+  /** Blank means "not declared", which is different from zero — see the record on the server. */
+  const num = (raw: string): number | null => {
+    const t = raw.trim();
+    if (t === '') return null;
+    const v = Number(t);
+    return Number.isNaN(v) ? null : v;
+  };
+
+  const revenueBand = bandFor(plan.revenueBands, plan.revenueActualCr);
+  const grrBand = bandFor(plan.grrBands, plan.grrActualPercent);
+
+  const label: React.CSSProperties = {
+    fontSize: '0.75rem',
+    fontWeight: 600,
+    color: 'var(--muted-foreground)',
+    display: 'block',
+    marginBottom: '0.25rem',
+  };
+  const note: React.CSSProperties = { fontSize: '0.75rem', color: 'var(--muted-foreground)' };
+
+  return (
+    <section className="card" style={{ padding: '1.125rem', display: 'grid', gap: '1.25rem' }}>
+      <div>
+        <h2 style={{ fontSize: '0.9375rem', fontWeight: 700, marginBottom: '0.25rem' }}>
+          Variable pay plan — {plan.fyLabel}
+        </h2>
+        <p style={{ ...note, marginBottom: 0 }}>
+          Variable Pay Policy v{plan.policyVersion} (Non-Sales). Payout is a company share plus an
+          individual share, weighted by grade. Sales is on its own policy and is excluded.
+          {plan.updatedBy ? ` Last changed by ${plan.updatedBy}.` : ''}
+        </p>
+      </div>
+
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>This year&apos;s company result</h3>
+        <p style={note}>
+          Leave these blank until the result is declared. Blank means &quot;not yet known&quot;, and
+          the assistant then answers with the individual share only and says it is partial — a zero
+          here would tell every employee the company missed.
+        </p>
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 14rem' }}>
+            <label style={label}>Revenue achieved (₹ Cr)</label>
+            <input
+              className="input"
+              inputMode="decimal"
+              placeholder="not declared"
+              value={plan.revenueActualCr ?? ''}
+              onChange={(e) => setPlan({ ...plan, revenueActualCr: num(e.target.value) })}
+              style={{ width: '100%' }}
+            />
+            <span style={note}>
+              {revenueBand
+                ? `→ ${revenueBand.name} (${revenueBand.funding}x)`
+                : 'Not declared — company share not computed'}
+            </span>
+          </div>
+          <div style={{ flex: '1 1 14rem' }}>
+            <label style={label}>GRR achieved (%)</label>
+            <input
+              className="input"
+              inputMode="decimal"
+              placeholder="not declared"
+              value={plan.grrActualPercent ?? ''}
+              onChange={(e) => setPlan({ ...plan, grrActualPercent: num(e.target.value) })}
+              style={{ width: '100%' }}
+            />
+            <span style={note}>
+              {grrBand
+                ? `→ ${grrBand.name} (${grrBand.funding}x)`
+                : 'Not declared — company share not computed'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <BandEditor
+        title="Revenue bands (₹ Cr)"
+        bands={plan.revenueBands}
+        onChange={(revenueBands) => setPlan({ ...plan, revenueBands })}
       />
-      <RolesPanel roles={roles} permissions={permissions} onChanged={reload} />
+      <BandEditor
+        title="GRR bands (%)"
+        bands={plan.grrBands}
+        onChange={(grrBands) => setPlan({ ...plan, grrBands })}
+      />
+
+      <div style={{ display: 'grid', gap: '0.5rem' }}>
+        <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>Grade weighting</h3>
+        <p style={note}>
+          How much of the payout rides on the company versus the individual. The policy writes these
+          as X-grades; they are the same ladder as the L-grades in the employee records.
+        </p>
+        {plan.gradeWeights.map((w, i) => (
+          <div key={`${w.fromLevel}-${w.toLevel}`} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ ...note, minWidth: '5rem' }}>
+              L{w.fromLevel}–L{w.toLevel}
+            </span>
+            <input
+              className="input"
+              inputMode="decimal"
+              value={w.companyPercent}
+              onChange={(e) => {
+                const next = [...plan.gradeWeights];
+                next[i] = { ...w, companyPercent: Number(e.target.value) || 0 };
+                setPlan({ ...plan, gradeWeights: next });
+              }}
+              style={{ width: '5.5rem' }}
+            />
+            <span style={note}>% company</span>
+            <input
+              className="input"
+              inputMode="decimal"
+              value={w.individualPercent}
+              onChange={(e) => {
+                const next = [...plan.gradeWeights];
+                next[i] = { ...w, individualPercent: Number(e.target.value) || 0 };
+                setPlan({ ...plan, gradeWeights: next });
+              }}
+              style={{ width: '5.5rem' }}
+            />
+            <span style={note}>% individual</span>
+            {w.companyPercent + w.individualPercent !== 100 && (
+              <span style={{ ...note, color: 'var(--error-ink)' }}>
+                does not add to 100
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gap: '0.5rem' }}>
+        <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>Rating payouts</h3>
+        <p style={note}>
+          What each appraisal rating funds on the individual share. The policy words these as
+          &quot;up to&quot; and leaves the final figure to the organisation, and the assistant says
+          so whenever it quotes one.
+        </p>
+        {plan.ratingPayouts.map((r, i) => (
+          <div key={r.rating} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <span style={{ ...note, minWidth: '9rem' }}>
+              {r.rating} — {r.label}
+            </span>
+            <input
+              className="input"
+              inputMode="decimal"
+              value={r.payoutPercent}
+              onChange={(e) => {
+                const next = [...plan.ratingPayouts];
+                next[i] = { ...r, payoutPercent: Number(e.target.value) || 0 };
+                setPlan({ ...plan, ratingPayouts: next });
+              }}
+              style={{ width: '5.5rem' }}
+            />
+            <span style={note}>% of the individual share</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn btn-primary btn-sm" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : 'Save plan'}
+        </button>
+        {saved && <span style={{ ...note, color: 'var(--success-ink)' }}>{saved}</span>}
+        {error && <span style={{ ...note, color: 'var(--error-ink)' }}>{error}</span>}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * The three revenue-function policies — US, India Sales, PS & CSM — as editable data.
+ *
+ * A generic editor rather than three bespoke forms, because the three differ in almost every
+ * particular while sharing one shape: roles earn weighted components, each scored on a slab, with
+ * kickers on top. Hand-written forms would have to be rewritten for next year's revision; this one
+ * renders whatever the server holds.
+ *
+ * The org values sit first because they are what changes most — thresholds, hourly floors, service
+ * base rates, and the BU-target-met flags that decide whether a 50% retention tier pays at all.
+ */
+function FunctionPayPanel() {
+  const [plans, setPlans] = useState<FunctionPayPlan[]>([]);
+  const [active, setActive] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      setPlans((await fetchFunctionPayPlans()).plans);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the pay plans.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  if (loading) return <section className="card" style={{ padding: '1.125rem' }}>Loading…</section>;
+  if (!plans.length) {
+    return (
+      <section className="card" style={{ padding: '1.125rem' }}>
+        <span style={{ color: 'var(--error-ink)' }}>{error ?? 'No plans available.'}</span>
+      </section>
+    );
+  }
+
+  const plan = plans[active];
+  const patch = (next: FunctionPayPlan) =>
+    setPlans(plans.map((p, i) => (i === active ? next : p)));
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    setSaved(null);
+    try {
+      const updated = await saveFunctionPayPlan(plan);
+      setPlans(plans.map((p, i) => (i === active ? updated : p)));
+      setSaved(`Saved ${new Date(updated.updatedAt).toLocaleString()}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the plan.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Blank means "not declared", which the calculator treats differently from zero. */
+  const num = (raw: string): number | null => {
+    const t = raw.trim();
+    if (t === '') return null;
+    const v = Number(t);
+    return Number.isNaN(v) ? null : v;
+  };
+  const note: React.CSSProperties = { fontSize: '0.75rem', color: 'var(--muted-foreground)' };
+  const h3: React.CSSProperties = { fontSize: '0.8125rem', fontWeight: 700, marginTop: '0.5rem' };
+
+  return (
+    <section className="card" style={{ padding: '1.125rem', display: 'grid', gap: '1rem' }}>
+      <div style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
+        {plans.map((p, i) => (
+          <button
+            key={p.planKey}
+            className={i === active ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
+            onClick={() => setActive(i)}
+          >
+            {p.planKey}
+          </button>
+        ))}
+      </div>
+
+      <div>
+        <h2 style={{ fontSize: '0.9375rem', fontWeight: 700 }}>{plan.label}</h2>
+        <p style={{ ...note, marginBottom: 0 }}>
+          v{plan.policyVersion} · {plan.fyLabel} · amounts in <strong>{plan.currency}</strong>
+          {plan.updatedBy ? ` · last changed by ${plan.updatedBy}` : ''}
+        </p>
+        <p style={note}>
+          These policies measure targets held in ACE, KAM Connect and the Sales Ops dashboards, which
+          are not in the HR extract. The assistant computes a payout from figures an employee gives
+          it, against the rules below.
+        </p>
+      </div>
+
+      <div style={{ display: 'grid', gap: '0.5rem' }}>
+        <h3 style={h3}>Organisation values</h3>
+        <p style={note}>
+          Thresholds, hourly floors and base rates. Leave a value blank for &quot;not declared&quot; —
+          the BU-target flags decide whether a 50% retention tier pays at all, so a blank there is
+          not the same as a zero.
+        </p>
+        {plan.orgValues.map((v, i) => (
+          <div key={v.key} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ ...note, flex: '1 1 18rem', minWidth: 0 }} title={v.note ?? undefined}>
+              {v.label}
+            </span>
+            <input
+              className="input"
+              inputMode="decimal"
+              placeholder="not declared"
+              value={v.value ?? ''}
+              onChange={(e) => {
+                const next = [...plan.orgValues];
+                next[i] = { ...v, value: num(e.target.value) };
+                patch({ ...plan, orgValues: next });
+              }}
+              style={{ width: '8rem' }}
+            />
+            <span style={{ ...note, width: '9rem' }}>{v.unit}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        <h3 style={h3}>Payout slabs</h3>
+        {plan.slabs.map((slab, si) => (
+          <div key={slab.key} style={{ borderTop: '1px solid var(--border)', paddingTop: '0.5rem' }}>
+            <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>{slab.label}</div>
+            <div style={note}>{slabKindLabel(slab.kind)}{slab.buTargetGates ? ' · 50% tier needs the BU target met' : ''}</div>
+            {slab.bands.map((b, bi) => (
+              <div key={b.name} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.25rem', flexWrap: 'wrap' }}>
+                <span style={{ ...note, width: '11rem' }}>{b.name}</span>
+                <input
+                  className="input" inputMode="decimal" placeholder="—" style={{ width: '5.5rem' }}
+                  value={b.fromExclusive ?? ''}
+                  onChange={(e) => {
+                    const slabs = [...plan.slabs];
+                    const bands = [...slab.bands];
+                    bands[bi] = { ...b, fromExclusive: num(e.target.value) };
+                    slabs[si] = { ...slab, bands };
+                    patch({ ...plan, slabs });
+                  }}
+                />
+                <span style={note}>to</span>
+                <input
+                  className="input" inputMode="decimal" placeholder="—" style={{ width: '5.5rem' }}
+                  value={b.toInclusive ?? ''}
+                  onChange={(e) => {
+                    const slabs = [...plan.slabs];
+                    const bands = [...slab.bands];
+                    bands[bi] = { ...b, toInclusive: num(e.target.value) };
+                    slabs[si] = { ...slab, bands };
+                    patch({ ...plan, slabs });
+                  }}
+                />
+                <span style={note}>pays</span>
+                <input
+                  className="input" inputMode="decimal" style={{ width: '5rem' }}
+                  value={b.factorPercent}
+                  onChange={(e) => {
+                    const slabs = [...plan.slabs];
+                    const bands = [...slab.bands];
+                    bands[bi] = { ...b, factorPercent: Number(e.target.value) || 0 };
+                    slabs[si] = { ...slab, bands };
+                    patch({ ...plan, slabs });
+                  }}
+                />
+                <span style={note}>%</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        <h3 style={h3}>Roles — components and kicker rates</h3>
+        {plan.roles.map((role, ri) => (
+          <div key={role.key} style={{ borderTop: '1px solid var(--border)', paddingTop: '0.5rem' }}>
+            <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>
+              {role.function} — {role.level}
+            </div>
+            {role.components.map((c, ci) => (
+              <div key={c.name} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.25rem', flexWrap: 'wrap' }}>
+                <span style={{ ...note, flex: '1 1 16rem', minWidth: 0 }} title={c.note ?? undefined}>
+                  {c.name} <em>({c.frequency})</em>
+                </span>
+                <input
+                  className="input" inputMode="decimal" style={{ width: '5rem' }}
+                  value={c.weightPercent}
+                  onChange={(e) => {
+                    const roles = [...plan.roles];
+                    const components = [...role.components];
+                    components[ci] = { ...c, weightPercent: Number(e.target.value) || 0 };
+                    roles[ri] = { ...role, components };
+                    patch({ ...plan, roles });
+                  }}
+                />
+                <span style={note}>%</span>
+              </div>
+            ))}
+            {role.components.reduce((t, c) => t + c.weightPercent, 0) !== 100 && (
+              <div style={{ ...note, color: 'var(--error-ink)' }}>
+                components do not total 100% — the policy says they always do
+              </div>
+            )}
+            {role.kickers.map((k, ki) => (
+              <div key={k.name} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.25rem', flexWrap: 'wrap' }}>
+                <span style={{ ...note, flex: '1 1 16rem', minWidth: 0, opacity: 0.85 }}>
+                  kicker · {k.name} — of {k.basis} ({k.frequency})
+                </span>
+                <input
+                  className="input" inputMode="decimal" style={{ width: '5rem' }}
+                  value={k.ratePercent}
+                  onChange={(e) => {
+                    const roles = [...plan.roles];
+                    const kickers = [...role.kickers];
+                    kickers[ki] = { ...k, ratePercent: Number(e.target.value) || 0 };
+                    roles[ri] = { ...role, kickers };
+                    patch({ ...plan, roles });
+                  }}
+                />
+                <span style={note}>%</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn btn-primary btn-sm" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : `Save ${plan.planKey}`}
+        </button>
+        {saved && <span style={{ ...note, color: 'var(--success-ink)' }}>{saved}</span>}
+        {error && <span style={{ ...note, color: 'var(--error-ink)' }}>{error}</span>}
+      </div>
+    </section>
+  );
+}
+
+/** One achievement ladder. Open-ended top and bottom bands are shown as such rather than as 0. */
+function BandEditor({
+  title,
+  bands,
+  onChange,
+}: {
+  title: string;
+  bands: Band[];
+  onChange: (bands: Band[]) => void;
+}) {
+  const note: React.CSSProperties = { fontSize: '0.75rem', color: 'var(--muted-foreground)' };
+  const edit = (i: number, patch: Partial<Band>) => {
+    const next = [...bands];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  const num = (raw: string): number | null => {
+    const t = raw.trim();
+    if (t === '') return null;
+    const v = Number(t);
+    return Number.isNaN(v) ? null : v;
+  };
+
+  return (
+    <div style={{ display: 'grid', gap: '0.5rem' }}>
+      <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>{title}</h3>
+      {bands.map((b, i) => (
+        <div key={b.name} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ ...note, minWidth: '8.5rem' }}>{b.name}</span>
+          <input
+            className="input"
+            inputMode="decimal"
+            placeholder="—"
+            value={b.fromInclusive ?? ''}
+            onChange={(e) => edit(i, { fromInclusive: num(e.target.value) })}
+            style={{ width: '6rem' }}
+          />
+          <span style={note}>to under</span>
+          <input
+            className="input"
+            inputMode="decimal"
+            placeholder="—"
+            value={b.toExclusive ?? ''}
+            onChange={(e) => edit(i, { toExclusive: num(e.target.value) })}
+            style={{ width: '6rem' }}
+          />
+          <span style={note}>funds</span>
+          <input
+            className="input"
+            inputMode="decimal"
+            value={b.funding}
+            onChange={(e) => edit(i, { funding: Number(e.target.value) || 0 })}
+            style={{ width: '5rem' }}
+          />
+          <span style={note}>x</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AuditTrail() {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [actions, setActions] = useState<string[]>([]);
+  const [filter, setFilter] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = useCallback(async (action: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchAudit(action || undefined);
+      setEvents(data.events);
+      // Only replace the filter options on an unfiltered read: a filtered response still carries
+      // the full catalogue, but taking it from the first load keeps the dropdown stable.
+      if (data.actions.length > 0) setActions(data.actions);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the audit trail.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload(filter);
+  }, [reload, filter]);
+
+  return (
+    <div style={{ display: 'grid', gap: '1.25rem' }}>
+      {error && (
+        <div
+          className="card"
+          style={{
+            padding: '0.875rem 1rem',
+            borderColor: 'var(--error)',
+            background: 'var(--error-soft)',
+            fontSize: '0.8125rem',
+          }}
+        >
+          <strong style={{ color: 'var(--error)' }}>Audit trail unavailable.</strong> {error}
+        </div>
+      )}
+
+      <section className="card" style={{ padding: '1.125rem' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            marginBottom: '1rem',
+          }}
+        >
+          <div>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 700, marginBottom: '0.25rem' }}>
+              Audit trail
+            </h3>
+            <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+              Policy uploads and access changes, newest first. Append-only — nothing here can be
+              edited or removed from the console.
+            </p>
+          </div>
+
+          <select
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="Filter by action"
+            style={{
+              padding: '0.5rem 0.625rem',
+              fontSize: '0.8125rem',
+              borderRadius: 'var(--radius)',
+              border: '1px solid var(--border)',
+              background: 'var(--surface)',
+              color: 'var(--foreground)',
+            }}
+          >
+            <option value="">All actions</option>
+            {actions.map((a) => (
+              <option key={a} value={a}>
+                {AUDIT_ACTION_LABELS[a] ?? a}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {loading ? (
+          <div className="skeleton" style={{ height: 200 }} />
+        ) : events.length === 0 ? (
+          <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+            {filter
+              ? 'Nothing recorded for that action yet.'
+              : 'Nothing recorded yet. Uploading a policy or changing someone’s access will appear here.'}
+          </p>
+        ) : (
+          <ul style={{ display: 'grid', gap: '0.625rem', listStyle: 'none' }}>
+            {events.map((event) => {
+              const tone = actionTone(event.action);
+              return (
+                <li
+                  key={event.id}
+                  style={{
+                    padding: '0.75rem 0.875rem',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--surface-2)',
+                    display: 'grid',
+                    gap: '0.375rem',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '0.5rem',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: '0.6875rem',
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.03em',
+                        padding: '0.125rem 0.5rem',
+                        borderRadius: 999,
+                        color: tone.fg,
+                        background: tone.bg,
+                      }}
+                    >
+                      {AUDIT_ACTION_LABELS[event.action] ?? event.action}
+                    </span>
+                    <strong style={{ fontSize: '0.8125rem' }}>{event.actor}</strong>
+                    <span
+                      title={exactTime(event.at)}
+                      style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}
+                    >
+                      {timeAgo(event.at)}
+                    </span>
+                  </div>
+                  {/* Capped measure: the shell is wide now, and a sentence running the full
+                      1560px is hard to track back to the start of the next line. */}
+                  <p
+                    style={{
+                      fontSize: '0.8125rem',
+                      color: 'var(--foreground)',
+                      maxWidth: '90ch',
+                    }}
+                  >
+                    {event.detail}
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sign-ins (HR Ops Admin)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who has signed in, and when they last did.
+ *
+ * Sign-ins rather than "employees": the list is keyed on the account that authenticated, so it
+ * includes people the HR extract does not cover — new joiners, contractors, admin accounts. The
+ * employee code is shown when the extract resolves one, and left blank when it does not, which is
+ * more honest than implying everyone who signs in is in the extract.
+ */
+function SignIns() {
+  const [logins, setLogins] = useState<LoginRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchLogins();
+      setLogins(data.logins);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the sign-in list.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const cell: React.CSSProperties = {
+    padding: '0.625rem 0.75rem',
+    fontSize: '0.8125rem',
+    textAlign: 'left',
+    borderBottom: '1px solid var(--border)',
+    whiteSpace: 'nowrap',
+  };
+
+  const head: React.CSSProperties = {
+    ...cell,
+    fontSize: '0.6875rem',
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.03em',
+    color: 'var(--muted-foreground)',
+  };
+
+  return (
+    <div style={{ display: 'grid', gap: '1.25rem' }}>
+      {error && (
+        <div
+          className="card"
+          style={{
+            padding: '0.875rem 1rem',
+            borderColor: 'var(--error)',
+            background: 'var(--error-soft)',
+            fontSize: '0.8125rem',
+          }}
+        >
+          <strong style={{ color: 'var(--error)' }}>Sign-in list unavailable.</strong> {error}
+        </div>
+      )}
+
+      <section className="card" style={{ padding: '1.125rem' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            marginBottom: '1rem',
+          }}
+        >
+          <div>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 700, marginBottom: '0.25rem' }}>
+              Sign-ins
+            </h3>
+            <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+              Everyone who has signed in to the assistant, most recent first. Updated on each
+              sign-in.
+            </p>
+          </div>
+          <button className="btn btn-ghost" onClick={() => void reload()} disabled={loading}>
+            <RefreshIcon />
+            Refresh
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="skeleton" style={{ height: 200 }} />
+        ) : logins.length === 0 ? (
+          <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+            No sign-ins recorded yet.
+          </p>
+        ) : (
+          // Its own scroll container: the page body must never scroll sideways.
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={head}>Employee</th>
+                  <th style={head}>Code</th>
+                  <th style={head}>Last sign-in</th>
+                  <th style={head}>Sign-ins</th>
+                  <th style={head}>Method</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logins.map((row) => (
+                  <tr key={row.id}>
+                    <td style={cell}>
+                      <div style={{ fontWeight: 600 }}>{row.name}</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+                        {row.email}
+                      </div>
+                    </td>
+                    <td style={{ ...cell, color: 'var(--muted-foreground)' }}>
+                      {row.employeeCode ?? '—'}
+                    </td>
+                    <td style={cell} title={exactTime(row.lastLoginAt)}>
+                      {timeAgo(row.lastLoginAt)}
+                    </td>
+                    <td style={cell}>{row.loginCount}</td>
+                    <td style={{ ...cell, color: 'var(--muted-foreground)' }}>{row.method}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -2031,7 +3059,9 @@ function UsersPanel({
                         color: isAdmin ? 'var(--primary)' : 'var(--muted-foreground)',
                       }}
                     >
-                      {isAdmin ? 'HR admin' : 'Employee'}
+                      {/* What the badge reports is whether the console opens, which is now
+                          decided by either of two roles — so it names the access, not a role. */}
+                      {isAdmin ? 'Console access' : 'No console access'}
                     </span>
                     <button
                       className="btn btn-ghost btn-sm"
@@ -2092,40 +3122,7 @@ function RolesPanel({
   permissions: PermissionDefinition[];
   onChanged: () => Promise<void>;
 }) {
-  const [label, setLabel] = useState('');
-  const [description, setDescription] = useState('');
-  const [granted, setGranted] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Shown live, because the name is what assignments key on and it is the one
-  // thing about a role that cannot be changed afterwards.
-  const name = slugify(label);
-
-  const create = async () => {
-    if (!label.trim()) return;
-    setBusy(true);
-    setError(null);
-    setStatus(null);
-    try {
-      await createRole({
-        name,
-        label: label.trim(),
-        description: description.trim(),
-        permissions: granted,
-      });
-      setLabel('');
-      setDescription('');
-      setGranted([]);
-      setStatus('Role created.');
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create that role.');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const togglePermission = async (role: Role, key: string, checked: boolean) => {
     setError(null);
@@ -2153,13 +3150,43 @@ function RolesPanel({
     }
   };
 
+  const [newLabel, setNewLabel] = useState('');
+  const [newDescription, setNewDescription] = useState('');
+  const [newPermissions, setNewPermissions] = useState<string[]>([ADMIN_CONSOLE]);
+  const [creating, setCreating] = useState(false);
+
+  const create = async () => {
+    setError(null);
+    setCreating(true);
+    try {
+      await createRole({
+        name: slugify(newLabel),
+        label: newLabel,
+        description: newDescription,
+        permissions: newPermissions,
+      });
+      setNewLabel('');
+      setNewDescription('');
+      setNewPermissions([ADMIN_CONSOLE]);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create that role.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const toggleNewPermission = (key: string, checked: boolean) =>
+    setNewPermissions((held) =>
+      checked ? [...held, key] : held.filter((p) => p !== key)
+    );
+
   return (
     <section className="card" style={{ padding: '1.125rem' }}>
       <h2 style={{ fontSize: '0.9375rem', fontWeight: 700, marginBottom: '0.25rem' }}>Roles</h2>
       <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)', marginBottom: '1rem' }}>
-        A role is a named set of permissions. Built-in roles cannot be deleted and their
-        permissions are fixed — <strong>HR admin</strong> losing console access would leave nobody
-        able to hand it back out.
+        Every role is defined here — nothing ships with any. Give each one only the areas it needs;
+        a role without <strong>Open the HR admin console</strong> reaches nothing at all.
       </p>
 
       <div style={{ display: 'grid', gap: '0.5rem', marginBottom: '1.25rem' }}>
@@ -2251,91 +3278,112 @@ function RolesPanel({
         ))}
       </div>
 
-      <div style={{ display: 'grid', gap: '0.625rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+      {/*
+        There was no form here while the role set was fixed at two — the server refused
+        createRole, and a form that always errors reads as a broken feature rather than a
+        deliberate constraint. Both halves of that changed together: the console's areas are
+        separate permissions now, so a third role can differ from the built-ins by what it grants
+        rather than only by its name.
+      */}
+      <div
+        style={{
+          display: 'grid',
+          gap: '0.5rem',
+          borderTop: '1px solid var(--border)',
+          paddingTop: '1rem',
+          marginTop: '1rem',
+        }}
+      >
         <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>Add a role</h3>
-
-        <div style={{ display: 'flex', gap: '0.625rem', flexWrap: 'wrap' }}>
-          <label style={{ flex: '1 1 200px' }}>
-            <span className="label-caps">Name</span>
-            <input
-              className="input"
-              style={{ marginTop: '0.25rem' }}
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="e.g. Payroll viewer"
-            />
-            {name && (
-              <span style={{ fontSize: '0.6875rem', color: 'var(--faint)' }}>
-                Saved as <code>{name}</code> — permanent, since assignments reference it.
-              </span>
-            )}
-          </label>
-          <label style={{ flex: '1 1 240px' }}>
-            <span className="label-caps">Description (optional)</span>
-            <input
-              className="input"
-              style={{ marginTop: '0.25rem' }}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Who this is for"
-            />
-          </label>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <input
+            className="input"
+            placeholder="Name, e.g. Policy Librarian"
+            value={newLabel}
+            onChange={(e) => setNewLabel(e.target.value)}
+            style={{ flex: '1 1 12rem', minWidth: 0 }}
+          />
+          <input
+            className="input"
+            placeholder="What it is for (optional)"
+            value={newDescription}
+            onChange={(e) => setNewDescription(e.target.value)}
+            style={{ flex: '2 1 16rem', minWidth: 0 }}
+          />
         </div>
-
-        <div>
-          <span className="label-caps">Permissions</span>
-          <div style={{ display: 'grid', gap: '0.375rem', marginTop: '0.375rem' }}>
-            {permissions.map((permission) => (
+        <div style={{ display: 'flex', gap: '0.875rem', flexWrap: 'wrap' }}>
+          {permissions.map((permission) => {
+            // The console permission is the front door: without it the rest reach nothing, so it
+            // is checked and fixed rather than presented as a choice that silently breaks a role.
+            const isConsole = permission.key === ADMIN_CONSOLE;
+            return (
               <label
                 key={permission.key}
+                title={permission.description}
                 style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '0.5rem',
-                  fontSize: '0.8125rem',
-                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.375rem',
+                  fontSize: '0.75rem',
+                  color: 'var(--foreground-secondary)',
+                  cursor: isConsole ? 'not-allowed' : 'pointer',
+                  opacity: isConsole ? 0.7 : 1,
                 }}
               >
                 <input
                   type="checkbox"
-                  style={{ marginTop: '0.1875rem' }}
-                  checked={granted.includes(permission.key)}
-                  onChange={(e) =>
-                    setGranted(
-                      e.target.checked
-                        ? [...granted, permission.key]
-                        : granted.filter((p) => p !== permission.key)
-                    )
-                  }
+                  checked={isConsole || newPermissions.includes(permission.key)}
+                  disabled={isConsole}
+                  onChange={(e) => toggleNewPermission(permission.key, e.target.checked)}
                 />
-                <span>
-                  {permission.label}
-                  <span
-                    style={{
-                      display: 'block',
-                      fontSize: '0.75rem',
-                      color: 'var(--muted-foreground)',
-                    }}
-                  >
-                    {permission.description}
-                  </span>
-                </span>
+                {permission.label}
               </label>
-            ))}
-          </div>
+            );
+          })}
         </div>
-
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={create} disabled={busy || !name}>
-            <PlusIcon size={15} />
-            {busy ? 'Creating…' : 'Create role'}
+        <div>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={create}
+            disabled={creating || !newLabel.trim()}
+          >
+            {creating ? 'Creating…' : 'Create role'}
           </button>
-          {status && (
-            <span style={{ fontSize: '0.8125rem', color: 'var(--success-ink)' }}>{status}</span>
-          )}
-          {error && (
-            <span style={{ fontSize: '0.8125rem', color: 'var(--error-ink)' }}>{error}</span>
-          )}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gap: '0.5rem',
+          borderTop: '1px solid var(--border)',
+          paddingTop: '1rem',
+        }}
+      >
+        {error && (
+          <span style={{ fontSize: '0.8125rem', color: 'var(--error-ink)' }}>{error}</span>
+        )}
+        <h3 style={{ fontSize: '0.8125rem', fontWeight: 700 }}>What the permissions mean</h3>
+        <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+          Keep at least one role holding <strong>Manage roles and access</strong>, and someone
+          holding that role. If none is left, only the break-glass addresses configured for this
+          deployment can reach this page to grant it again.
+        </p>
+        <div style={{ display: 'grid', gap: '0.375rem', marginTop: '0.25rem' }}>
+          {permissions.map((permission) => (
+            <div key={permission.key} style={{ fontSize: '0.8125rem' }}>
+              <strong>{permission.label}</strong>
+              <span
+                style={{
+                  display: 'block',
+                  fontSize: '0.75rem',
+                  color: 'var(--muted-foreground)',
+                }}
+              >
+                {permission.description}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
     </section>
