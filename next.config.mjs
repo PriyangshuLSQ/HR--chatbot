@@ -8,6 +8,22 @@
 const API_BACKEND = process.env.KNOWLEDGE_API_URL || 'http://127.0.0.1:8080'
 
 const nextConfig = {
+  /*
+   * For the container image (see Dockerfile). `next build` traces the files the
+   * server actually needs and emits a self-contained .next/standalone, which is
+   * the difference between a 281 MB runtime image and the 939 MB one this project
+   * produced while it carried the whole node_modules tree.
+   *
+   * Additive, not a mode switch: `pnpm build && pnpm start` behaves exactly as
+   * before — this only writes an extra directory alongside the normal output.
+   *
+   * Worth knowing: it does NOT make API_BACKEND below a runtime setting. The
+   * rewrite table is resolved during `next build` and written into the route
+   * manifest, so KNOWLEDGE_API_URL is read at BUILD time whichever output mode is
+   * used. That is why the Dockerfile passes it as a build arg rather than an
+   * environment variable on the running container.
+   */
+  output: 'standalone',
   typescript: {
     ignoreBuildErrors: true,
   },

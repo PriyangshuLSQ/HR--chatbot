@@ -1,0 +1,217 @@
+# Robin — full local stack.
+#
+#   cp .env.example .env    # then fill in ANTHROPIC_API_KEY
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# Only 3000 (UI) and 8080 (API) are published. Qdrant, Mongo and Ollama stay on
+# the internal network on purpose: this project is normally developed with those
+# three running natively on the same machine, and publishing the container ports
+# would either collide with the host daemons or, worse, silently connect the
+# containers to them.
+
+name: hr-chatbot-robin
+
+services:
+  # -------------------------------------------------------------------------
+  # Vectors and passages — hr_chunks / hr_docs, 768-dim nomic-embed-text.
+  # -------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.16.1
+    restart: unless-stopped
+    volumes:
+      # A named volume, NOT a bind mount of ./data/qdrant. Qdrant takes an
+      # exclusive lock on its storage directory, so binding the host path means
+      # this container and a natively-installed Qdrant cannot both run — and the
+      # failure surfaces as a container that will not start.
+      #
+      # The index rebuilds itself on first boot anyway: the collections come up
+      # empty, which triggers the backend's one-time import of
+      # /data/knowledge.json (see LEGACY_STORE below).
+      - qdrant-storage:/qdrant/storage
+    # No healthcheck: this image ships neither curl nor wget, and every probe
+    # that can be written with what it does have reports healthy too early. The
+    # backend retries its connection, which is the real guard.
+
+  # -------------------------------------------------------------------------
+  # Tickets, answer ratings, chat threads. Records, not vectors.
+  # -------------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # Embeddings only. Answer writing is the Claude API — see docs/AI-SETUP.md for
+  # why this half cannot move: Anthropic has no embeddings endpoint, and a query
+  # embedded by a different model lands in a different vector space.
+  # -------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot: pulls the 274 MB embedding model into the volume above, then exits.
+  # `docker compose up` reports it as "exited (0)", which is success, not a crash.
+  #
+  # Separate from the ollama service because the official image's entrypoint is
+  # the server; there is no hook for "serve, then pull". The CLI here talks to the
+  # neighbouring container over OLLAMA_HOST rather than running a second daemon.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "nomic-embed-text"]
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # The Java knowledge service.
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      # Not service_healthy: a cold pull of the embedding model takes minutes,
+      # and the backend does not need an embedder to boot — it starts in keyword
+      # mode and upgrades to semantic once Ollama answers. Blocking here would
+      # turn a first-run download into a startup failure.
+      ollama-pull:
+        condition: service_started
+    environment:
+      # Service names, not 127.0.0.1 — inside a container loopback is the
+      # container itself.
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_URL: http://ollama:11434
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017}
+      # Unchanged from the pre-rename default deliberately: this names an existing
+      # database, and renaming it would leave every ticket and chat thread behind
+      # in the old one.
+      MONGODB_DB: ${MONGODB_DB:-hr_cockpit}
+
+      # Answer writing and OCR. Blank is a supported state — answers degrade to
+      # extractive rather than failing.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-4-5}
+      KNOWLEDGE_CLAUDE_EFFORT: ${KNOWLEDGE_CLAUDE_EFFORT:-low}
+
+      # Where the browser is, which is what the Entra redirect URI must match.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+
+      # This is what lets the stack come up with no Entra credentials, and it is
+      # not cosmetic: application.yml declares the `azure-ad` registration
+      # unconditionally, and Spring Boot validates that map at startup. With no
+      # client-id anywhere the service does not run open — it dies during bean
+      # creation with "Client id of registration 'azure-ad' must not be empty."
+      #
+      # Excluding the autoconfiguration removes the registration map instead of
+      # supplying a fake credential, so SecurityConfig sees genuinely
+      # unconfigured sign-in (it injects the repository through an
+      # ObjectProvider) and takes its documented open branch, logging the
+      # "Entra sign-in is OFF" warning. A placeholder client-id would instead
+      # leave the app believing SSO works.
+      #
+      # Set this to an empty string in .env when you supply real credentials —
+      # see the Entra block in .env.example. Leaving it set would disable the
+      # sign-in you just configured.
+      SPRING_AUTOCONFIGURE_EXCLUDE: ${SPRING_AUTOCONFIGURE_EXCLUDE-org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientAutoConfiguration}
+
+      # Passed through so Entra credentials can be supplied without a bind mount.
+      # It has to be this rather than discrete SPRING_* variables: the
+      # registration id is `azure-ad`, and Spring strips hyphens when binding
+      # from the environment, so SPRING_..._AZURE_AD_CLIENT_ID would define a
+      # registration called `azuread` — which no longer matches the callback
+      # path. SPRING_APPLICATION_JSON is parsed as JSON, so the key survives
+      # intact. Empty is safe; Spring skips a blank value. See .env.example.
+      SPRING_APPLICATION_JSON: ${SPRING_APPLICATION_JSON-}
+      # See .env.example. Leaving this false is what allows an unauthenticated
+      # deployment to boot; any deployment holding the employee extract should
+      # set it true.
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+
+      # One-time seed of an empty Qdrant, from the corpus mounted below.
+      LEGACY_STORE: /data/knowledge.json
+      HR_EXTRACT_DIR: ${HR_EXTRACT_DIR:-}
+    volumes:
+      # Read-only, and read-only matters: this is the real policy corpus and the
+      # HR extract. The service should be able to import from it and never write
+      # to it.
+      - ./data:/data:ro
+      # Entra client-id/secret and the Atlas URI. Uncomment to reuse the config
+      # that already works natively instead of restating it as environment
+      # variables — the registration id `azure-ad` contains a hyphen, which
+      # Spring's env-var binding strips, so that one property genuinely cannot be
+      # set as SPRING_..._AZURE_AD_CLIENT_ID. Use this mount or
+      # SPRING_APPLICATION_JSON; see .env.example.
+      # - ./backend/application-local.yml:/app/application-local.yml:ro
+    healthcheck:
+      # /api/auth/me is the one endpoint that is public whether or not sign-in is
+      # configured (SecurityConfig.PUBLIC), so this probes the real HTTP stack
+      # without depending on auth being set up.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/auth/me"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 45s
+
+  # -------------------------------------------------------------------------
+  # The Next.js UI, and the proxy that puts it on one origin with the API.
+  # -------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      args:
+        # BUILD-time, not an environment variable on the container, and this is
+        # the one non-obvious thing about this image: Next resolves the rewrites
+        # in next.config.mjs during `next build` and freezes them into the route
+        # manifest. Passing this at run time instead leaves the proxy pointing at
+        # the build-time default and every /api call fails with
+        # `ECONNREFUSED 127.0.0.1:8080` while the UI itself loads perfectly.
+        #
+        # Consequence worth knowing: changing the backend address means rebuilding
+        # this image, not restarting it.
+        KNOWLEDGE_API_URL: http://backend:8080
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # wget, not curl: this is an alpine image, so the HTTP client available is
+      # busybox's.
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  qdrant-storage:
+  mongo-data:
+  ollama-models:

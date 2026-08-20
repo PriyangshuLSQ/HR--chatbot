@@ -20,7 +20,7 @@ server:
 
 spring:
   application:
-    name: hr-knowledge-backend
+    name: hr-chatbot-robin-backend
   # The Atlas connection string carries a password, so it lives in
   # `application-local.yml` (gitignored) rather than here. `optional:` keeps the
   # service bootable without it — Mongo just fails on first use, and the rest of

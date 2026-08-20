@@ -224,6 +224,84 @@ class CrossEmployeeAccessTest {
    * what separates the two readings — and the bare-noun version escaped notice only because "VP"
    * and "utilisation" were not in the personal-field vocabulary, which is luck rather than design.
    */
+  /**
+   * A colleague in the sentence is not a colleague's data being asked for.
+   *
+   * <p>The role check used to be co-occurrence: strip the role word, then look for any personal
+   * field anywhere. "My manager is asking me to take LOP for 3 days — how will this affect my
+   * salary and PF?" contains "manager" and "salary", and was refused as a request for the
+   * manager's record. Colleagues appear in an employee's own circumstances constantly — approving
+   * leave, asking for cover, rejecting a claim — and reading every mention as a data request
+   * refuses ordinary HR questions.
+   *
+   * <p>What separates the two is possession: "my manager's CTC" and "the CTC of my manager" reach
+   * for their record; "my manager asked me to take LOP" does not.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "My manager is asking me to take LOP for 3 days because I exhausted my leave. How will this affect my salary and PF this month?",
+        "my manager approved my leave, when will I be paid",
+        "my hrbp told me to check my grade, what is it",
+        "my manager rejected my expense claim, what is the policy",
+      })
+  @DisplayName("A colleague mentioned in the asker's own circumstances is not a data request")
+  void colleaguesInContextAreNotDataRequests(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — everything asked for belongs to the asker: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is the ctc of my manager",
+        "what is the grade of my reporting manager",
+        "salary of my team lead",
+        "what is my manager's ctc",
+      })
+  @DisplayName("A field belonging to a colleague is still refused")
+  void possessedFieldsAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — the field belongs to the colleague: %s", question)
+        .isTrue();
+  }
+
+  /**
+   * "My direct reporting manager" is the asker's own field; "my direct report" is somebody else.
+   *
+   * <p>The predicate pattern carried a bare "my direct", meant as the second. It also matched the
+   * first, so "who is my reporting manager" was allowed and inserting the word "direct" refused it
+   * — a stated outcome turned into a privacy notice by one adjective.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "Who is my direct reporting manager and who is my L2 manager?",
+        "Who is my direct reporting manager and L2 manager?",
+        "who is my direct reporting manager",
+      })
+  @DisplayName("A manager's name is a field on the asker's own record, however it is phrased")
+  void directReportingManagerIsOwnRecord(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — the manager's name is on the asker's record: %s", question)
+        .isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "what is my direct report's salary",
+        "my directs and their ctc",
+        "who reports to me and what do they earn",
+      })
+  @DisplayName("A subordinate's data is still refused")
+  void directReportsAreStillRefused(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be refused — this reaches for a subordinate's record: %s", question)
+        .isTrue();
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {

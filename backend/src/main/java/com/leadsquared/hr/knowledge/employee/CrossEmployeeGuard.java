@@ -207,6 +207,29 @@ public final class CrossEmployeeGuard {
           Pattern.CASE_INSENSITIVE);
 
   /**
+   * A field described as belonging to a colleague — "the CTC of my manager".
+   *
+   * <p>The counterpart to the apostrophe form, which {@link #ANY_POSSESSIVE} already catches. Both
+   * say the same thing: the thing being asked for is theirs. Nothing else about a colleague's
+   * presence in a sentence does.
+   */
+  private static final Pattern ROLE_OF_PHRASE =
+      Pattern.compile(
+          "\\b(?:of|for|about)\\s+(?:my|our|his|her|their|the)\\s+"
+              + "(?:reporting\\s+|line\\s+|l2\\s+|skip[- ]level\\s+|direct\\s+)?"
+              + "(manager|boss|supervisor|hrbp|function head|bu head|team lead|reportee|report)\\b"
+              // Possession is not always a preposition: "how much does my L2 manager earn" claims
+              // their pay as plainly as "the CTC of my L2 manager". The window is short and the
+              // verb must follow the role closely, so "my manager approved my leave, when will I
+              // be paid" — where the pay word belongs to a later clause about the asker — does
+              // not match.
+              + "|\\b(?:my|our|his|her|their|the)\\s+"
+              + "(?:reporting\\s+|line\\s+|l2\\s+|skip[- ]level\\s+|direct\\s+)?"
+              + "(?:manager|boss|supervisor|hrbp|function head|bu head|team lead|reportee)\\b"
+              + "[^.?]{0,15}?\\b(?:earn|earns|earning|make|makes|paid|salary|ctc|compensation)\\b",
+          Pattern.CASE_INSENSITIVE);
+
+  /**
    * Words that are a pointer on your own record rather than a field of someone else's.
    *
    * <p>Your manager's <em>name</em> is stored on your record and is yours to know — "who is my
@@ -287,7 +310,12 @@ public final class CrossEmployeeGuard {
   private static final Pattern IDENTIFYING_PREDICATE =
       Pattern.compile(
           "\\b(who joined|who reports|reporting to me|in my team|on my team|in my bu"
-              + "|in my department|under me|my team member|my direct)\\b",
+              // `my direct` was meant as "my direct report" — a subordinate, whose record is not
+              // the asker's. It also matched "my direct reporting manager", which is a field ON
+              // the asker's record and one of the stated outcomes: "who is my reporting manager"
+              // was allowed, and inserting the word "direct" refused it. Anchored to the noun now,
+              // and `reports?\\b` cannot match "reporting".
+              + "|in my department|under me|my team member|my direct reports?\\b|my directs)\\b",
           Pattern.CASE_INSENSITIVE);
 
   /** Why a question was refused. Recorded on the audit event so patterns are reviewable. */
@@ -337,9 +365,20 @@ public final class CrossEmployeeGuard {
     // framing is the tell: the rest of such a sentence is deliberately innocuous.
     if (IMPERSONATION.matcher(q).find()) return List.of(Reason.THIRD_PARTY_REFERENCE);
 
-    // A colleague named by role. Allowed only when the question asks who they are — their name is
-    // a field of the asker's own record — and refused when it reaches for anything of theirs.
-    if (ROLE_REFERENCE.matcher(q).find() && asksForAFieldBeyondThePointer(q)) {
+    // A colleague named by role, and the field belonging to THEM rather than merely appearing in
+    // the same sentence.
+    //
+    // The old test was co-occurrence: strip the role word, then look for any personal field
+    // anywhere. That refused "my manager is asking me to take LOP for 3 days — how will this
+    // affect my salary and PF this month?", a question about nobody but the asker, because the
+    // words "manager" and "salary" both appeared. Colleagues turn up in an employee's own
+    // circumstances constantly — they approve leave, they ask for cover, they set targets — and a
+    // rule that reads any such mention as a data request refuses ordinary HR questions.
+    //
+    // Possession is the signal. "My manager's CTC" and "the CTC of my manager" reach for their
+    // record; "my manager asked me to take LOP" does not. The apostrophe form is already caught
+    // upstream by the possessive check, so what remains here is the of-phrase.
+    if (ROLE_OF_PHRASE.matcher(q).find() && PERSONAL_FIELD.matcher(q).find()) {
       return List.of(Reason.THIRD_PARTY_REFERENCE);
     }
 

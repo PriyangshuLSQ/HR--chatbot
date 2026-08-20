@@ -273,9 +273,93 @@ Tuning knobs:
 - The grounding rules — synthesise in own words, answer the question asked, never
   calculate: `SYSTEM_PROMPT` in `backend/.../rag/RagService.java`
 
+## Running with Docker
+
+The whole stack — UI, Java service, Qdrant, MongoDB and Ollama — in one command:
+
+```bash
+cp .env.example .env          # then add ANTHROPIC_API_KEY (optional)
+docker compose up --build     # http://localhost:3000
+```
+
+First run takes a few minutes: it compiles the Java service and pulls the 274 MB
+embedding model. `ollama-pull` exits 0 once the model is in place — that is
+success, not a crash.
+
+| Service | Image | Port |
+|---|---|---|
+| `frontend` | built from `Dockerfile` | 3000 (published) |
+| `backend` | built from `backend/Dockerfile` | 8080 (published) |
+| `qdrant` | `qdrant/qdrant` | internal only |
+| `mongo` | `mongo:7` | internal only |
+| `ollama` | `ollama/ollama` | internal only |
+
+Only 3000 and 8080 are published. Qdrant, Mongo and Ollama stay on the internal
+network deliberately — this project is normally developed with those three
+running natively, and publishing the container ports would collide with the host
+daemons.
+
+Nothing is shared with a native Qdrant either: the container uses a named volume
+rather than binding `./data/qdrant`, because Qdrant takes an exclusive lock on its
+storage directory and binding it would stop the two from ever running together.
+The index is not lost by that — `./data` is mounted read-only at `/data`, an empty
+Qdrant triggers the one-time import of `/data/knowledge.json`, and the corpus is
+back.
+
+### What works without configuration
+
+With an empty `.env` the stack still comes up, and degrades exactly as
+[`docs/AI-SETUP.md`](docs/AI-SETUP.md) describes:
+
+- **Retrieval is semantic** — the Ollama container supplies `nomic-embed-text`.
+- **Answers are extractive** — no `ANTHROPIC_API_KEY`, so employees get the
+  matching policy passage quoted with its heading trail instead of written prose.
+- **Sign-in is OFF** — the demo login is used and every endpoint is open.
+
+That last one deserves care. `docker-compose.yml` sets
+`SPRING_AUTOCONFIGURE_EXCLUDE` to drop the OAuth2 client autoconfiguration,
+because `application.yml` declares the `azure-ad` registration unconditionally
+and Spring validates it at startup — with no credentials anywhere the service does
+not run open, it fails to boot with *"Client id of registration 'azure-ad' must
+not be empty"*. Excluding the autoconfiguration is what makes sign-in genuinely
+unconfigured rather than fake-configured, so `SecurityConfig` takes its documented
+open branch and logs the "Entra sign-in is OFF" warning.
+
+**Turning Entra on takes two settings, not one** — see the block in
+`.env.example`. Supplying credentials without also clearing
+`SPRING_AUTOCONFIGURE_EXCLUDE` configures a sign-in that is then switched off.
+Set `AUTH_REQUIRED=true` in anything holding the real employee extract; it turns
+the open state into a startup failure instead of a warning.
+
+### The one thing that is baked at build time
+
+`KNOWLEDGE_API_URL` is a **build arg**, not a runtime variable. Next resolves the
+rewrites in `next.config.mjs` during `next build` and freezes them into the route
+manifest, so setting it on the running container has no effect — the symptom is
+the UI loading fine while every `/api` call fails with `ECONNREFUSED
+127.0.0.1:8080`. Pointing the frontend at a different backend means rebuilding
+the image:
+
+```bash
+docker compose build --build-arg KNOWLEDGE_API_URL=https://api.example.com frontend
+```
+
+Everything else — the Claude key and model, Mongo URI, Entra credentials, auth
+flags, `HR_EXTRACT_DIR` — is read at run time and only needs a restart.
+
+### Handy commands
+
+```bash
+docker compose logs -f backend      # the Java service
+docker compose ps                   # health of each service
+docker compose down                 # stop; volumes survive
+docker compose down -v              # stop and DISCARD the Qdrant index and Mongo data
+```
+
 ## Deployment
 
-Two processes. The backend first, since the frontend proxies `/api/*` to it:
+Two processes, no containers. The backend first, since the frontend proxies
+`/api/*` to it:
 
 ```bash
 cd backend && mvn spring-boot:run    # :8080 — needs Qdrant and MongoDB

@@ -8,6 +8,9 @@ __v0_jsx-dev-runtime.ts
 
 # Environment variables
 .env*.local
+# Docker Compose reads .env automatically, and it holds ANTHROPIC_API_KEY and
+# possibly the Atlas URI. .env.example is the committed template.
+.env
 
 # Backend build output and local secrets (the Atlas connection string)
 backend/target/
