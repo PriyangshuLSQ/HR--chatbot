@@ -73,7 +73,22 @@ public class Retriever {
    * table was unreachable at any {@code topK}, and the employee was told the corpus did not cover
    * a number sitting in it.
    */
-  private static final double MAX_PER_DOC_SHARE = 0.6;
+  private static final double MAX_PER_DOC_SHARE = 0.75;
+
+  /**
+   * What a chunk's score is multiplied by when another pay plan owns its document.
+   *
+   * <p>A penalty, not a filter, and the difference matters: if the mapping is ever wrong the
+   * right passage is ranked lower rather than made unreachable, which is a recoverable failure
+   * instead of a silent one.
+   *
+   * <p>0.4 is enough to settle the case this exists for. An India Sales question returned six of
+   * eight extracts from the US policy at 0.664–0.684 — a spread of 0.02 — because that document
+   * contains sentences shaped like the question ("Pays out example (over-achievement): A Sales
+   * Executive has a total annual VP of $120,000…") while the India Sales policy words the same
+   * rule differently. Nothing subtle separates those scores, so nothing subtle will reorder them.
+   */
+  private static final double CROSS_PLAN_PENALTY = 0.4;
 
   /** Scores below this are noise and never reach the ranking. */
   private static final double SCORE_FLOOR = 0.02;
@@ -114,6 +129,22 @@ public class Retriever {
       Map<String, Double> denseScores,
       boolean hasQueryVector,
       int topK) {
+    return retrieve(query, snapshot, denseScores, hasQueryVector, topK, null, Map.of());
+  }
+
+  /**
+   * @param activePlanKey the pay plan this question is about, or null when it is not a pay
+   *     question. Only used to demote documents owned by a <em>different</em> plan.
+   * @param documentOwners document id to owning plan key; see FunctionPayPlanService
+   */
+  public Result retrieve(
+      String query,
+      KnowledgeSnapshot snapshot,
+      Map<String, Double> denseScores,
+      boolean hasQueryVector,
+      int topK,
+      String activePlanKey,
+      Map<String, String> documentOwners) {
 
     List<KnowledgeChunk> chunks = snapshot.chunks();
     if (chunks.isEmpty()) return Result.EMPTY;
@@ -144,6 +175,16 @@ public class Retriever {
           hasQueryVector && chunkEmbedded
               ? DENSE_WEIGHT * dense + LEXICAL_WEIGHT * lexical
               : lexical;
+
+      // Another plan's policy answers a different country's or function's question. Demoted
+      // only when this question has a resolved plan AND the document is claimed by a different
+      // one — an unclaimed document (most of the corpus) is untouched.
+      if (activePlanKey != null && !documentOwners.isEmpty()) {
+        String owner = documentOwners.get(chunk.docId());
+        if (owner != null && !owner.equals(activePlanKey)) {
+          score *= CROSS_PLAN_PENALTY;
+        }
+      }
 
       if (score <= SCORE_FLOOR) continue;
       scored.add(new RetrievedChunk(chunk, score, dense, lexical, docById.get(chunk.docId())));

@@ -558,7 +558,23 @@ public class EmployeeImportService {
                 num(row, col, "Est. Monthly In-Hand (₹)"),
                 null, // no prior-cycle payout in this extract
                 "FY 2026-27",
-                "INR");
+                "INR",
+                // The "Monthly Breakdown" block. Header keys are whitespace-collapsed, so the
+                // sheet's "Basic\n(Monthly ₹)" is matched as "Basic (Monthly ₹)".
+                num(row, col, "Total Target CTC (₹)"),
+                num(row, col, "Monthly CTC (₹)"),
+                num(row, col, "Basic (Monthly ₹)"),
+                num(row, col, "HRA (Monthly ₹)"),
+                num(row, col, "Special Allowance (₹)"),
+                num(row, col, "Employer PF (Monthly ₹)"),
+                num(row, col, "Gratuity Provision (₹)"),
+                num(row, col, "Employee PF Deduction (₹)"),
+                num(row, col, "Professional Tax (₹)"));
+                // Deliberately NOT imported: Grade Band Min/Midpoint/Max, Compa Ratio, Band
+                // Position and Last Increment %. Those are compensation-planning figures about
+                // where someone sits against their peers, not payslip components — telling an
+                // employee their band position is a decision for HR to take on purpose, not a
+                // side effect of fixing HRA.
         matched++;
       }
     } catch (IOException e) {

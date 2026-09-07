@@ -276,6 +276,10 @@ final class PublishedFunctionPlans {
         slabs,
         roles,
         org,
+        // No document owned by default. A seeded plan cannot know the id of a file an admin
+        // has not uploaded yet, and an empty list is neutral — nothing is demoted until the
+        // mapping is set deliberately.
+        List.of(),
         Instant.now().toString(),
         "system:published-policy");
   }
@@ -434,6 +438,10 @@ final class PublishedFunctionPlans {
         slabs,
         roles,
         org,
+        // No document owned by default. A seeded plan cannot know the id of a file an admin
+        // has not uploaded yet, and an empty list is neutral — nothing is demoted until the
+        // mapping is set deliberately.
+        List.of(),
         Instant.now().toString(),
         "system:published-policy");
   }
@@ -570,6 +578,10 @@ final class PublishedFunctionPlans {
         slabs,
         roles,
         org,
+        // No document owned by default. A seeded plan cannot know the id of a file an admin
+        // has not uploaded yet, and an empty list is neutral — nothing is demoted until the
+        // mapping is set deliberately.
+        List.of(),
         Instant.now().toString(),
         "system:published-policy");
   }

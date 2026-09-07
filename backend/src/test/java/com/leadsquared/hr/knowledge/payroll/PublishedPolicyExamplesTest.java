@@ -64,7 +64,8 @@ class PublishedPolicyExamplesTest {
             null, null, null, "confirmed", "M", "M2", "An HRBP"),
         new Employee.Compensation(
             new BigDecimal("2000000"), new BigDecimal(variableTarget), new BigDecimal("10"),
-            new BigDecimal("140000"), new BigDecimal("130000"), null, "FY 2026-27", "INR"),
+            new BigDecimal("140000"), new BigDecimal("130000"), null, "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
         null,
         List.of(),
         List.of(new Employee.PmsRecord("FY 2025-26", rating, null, null)),
@@ -143,7 +144,8 @@ class PublishedPolicyExamplesTest {
             new Employee.Employment("L5", "AE", "Sales", "Sales", "Quota", "Bengaluru",
                 null, null, null, "confirmed", "M", "M2", "HRBP"),
             new Employee.Compensation(new BigDecimal("2000000"), new BigDecimal("100000"),
-                new BigDecimal("10"), null, null, null, "FY 2026-27", "INR"),
+                new BigDecimal("10"), null, null, null, "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
             null, List.of(), List.of(new Employee.PmsRecord("FY 2025-26", "4", null, null)),
             Instant.now());
 
@@ -179,7 +181,8 @@ class PublishedPolicyExamplesTest {
             new Employee.Employment("L5", "Analyst", "Operations", "Ops", "Support", "Noida",
                 null, null, null, "confirmed", "M", "M2", "HRBP"),
             new Employee.Compensation(new BigDecimal("900000"), null, null, null, null, null,
-                "FY 2026-27", "INR"),
+                "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
             null, List.of(), List.of(new Employee.PmsRecord("FY 2025-26", "4", null, null)),
             Instant.now());
 
@@ -213,7 +216,8 @@ class PublishedPolicyExamplesTest {
             new Employee.Employment("L5", "Engineer", "Engineering", "Engineering", "Core", "Pune",
                 null, null, null, "confirmed", "M", "M2", "HRBP"),
             new Employee.Compensation(new BigDecimal("2000000"), new BigDecimal("100000"),
-                new BigDecimal("10"), null, null, null, "FY 2026-27", "INR"),
+                new BigDecimal("10"), null, null, null, "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
             null, List.of(),
             List.of(
                 new Employee.PmsRecord("FY 2023-24", "5", null, null),
@@ -267,7 +271,8 @@ class PublishedPolicyExamplesTest {
             new Employee.Employment("L3", "Analyst", "Operations", "Ops", "Support", "Pune",
                 null, null, null, "confirmed", "M", "M2", "HRBP"),
             new Employee.Compensation(new BigDecimal("900000"), null, null, null, null, null,
-                "FY 2026-27", "INR"),
+                "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
             null, List.of(), List.of(new Employee.PmsRecord("FY 2025-26", "3", null, null)),
             Instant.now());
 
@@ -287,7 +292,8 @@ class PublishedPolicyExamplesTest {
             new Employee.Employment("L5", "AE", "Sales", "Sales", "Quota", "Bengaluru",
                 null, null, null, "confirmed", "M", "M2", "HRBP"),
             new Employee.Compensation(new BigDecimal("2000000"), new BigDecimal("100000"),
-                null, null, null, null, "FY 2026-27", "INR"),
+                null, null, null, null, "FY 2026-27", "INR",
+                null, null, null, null, null, null, null, null, null),
             null, List.of(), List.of(new Employee.PmsRecord("FY 2025-26", "4", null, null)),
             Instant.now());
 

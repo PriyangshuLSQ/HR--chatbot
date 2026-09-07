@@ -18,6 +18,7 @@
  */
 
 import {
+  ApiError,
   fetchFeedback,
   fetchTickets,
   patchTicketStatus,
@@ -115,7 +116,7 @@ export const STORE_EVENT = 'hr-store:change';
 let ticketCache: Ticket[] = [];
 let feedbackCache: Feedback[] = [];
 let hydrated = false;
-let inFlight: Promise<void> | null = null;
+let inFlight: Promise<StoreLoad> | null = null;
 
 function announce(): void {
   if (typeof window === 'undefined') return;
@@ -131,16 +132,75 @@ function announce(): void {
  * Failures are surfaced, not swallowed — an admin looking at an empty dashboard
  * needs to know whether that means "no escalations" or "the store is down".
  */
-export async function hydrate(): Promise<void> {
+export type ResourceState = 'ok' | 'forbidden' | 'failed';
+
+export interface StoreLoad {
+  tickets: ResourceState;
+  feedback: ResourceState;
+  /** Set only where the state is `failed` — a real outage worth showing. */
+  ticketError?: string;
+  feedbackError?: string;
+}
+
+let lastLoad: StoreLoad = { tickets: 'failed', feedback: 'failed' };
+
+/**
+ * Loads both resources, and lets them fail independently.
+ *
+ * <p>This used to be one `Promise.all`, which made the two share a fate. `/api/feedback`
+ * is gated by `admin.digest` and `/api/tickets` by `admin.tickets`, so removing the
+ * digest permission from a role 403'd the feedback call, rejected the whole promise,
+ * and left the ticket cache empty — the escalation queue disappeared from every HR page
+ * and the banner said "Ticket store unavailable. Your account does not have HR admin
+ * access." Neither half of that was true: the ticket store was healthy and the account
+ * was an admin. It was missing one area permission, on purpose.
+ *
+ * <p>Never rejects. A caller cannot do anything useful with a thrown error here, and
+ * throwing is what produced a page-wide banner for a single withheld permission. The
+ * outcome per resource is returned instead, so the UI can hide a section it is not
+ * allowed to see and reserve the banner for something actually broken.
+ */
+export async function hydrate(opts?: { tickets?: boolean; feedback?: boolean }): Promise<StoreLoad> {
   if (inFlight) return inFlight;
+
+  // Default to fetching both. A caller that knows the session's permissions can skip
+  // what it would only be refused — see the admin console, which does.
+  const wantTickets = opts?.tickets !== false;
+  const wantFeedback = opts?.feedback !== false;
 
   inFlight = (async () => {
     try {
-      const [tickets, feedback] = await Promise.all([fetchTickets(), fetchFeedback()]);
-      ticketCache = tickets;
-      feedbackCache = feedback;
-      hydrated = true;
+      const [tickets, feedback] = await Promise.allSettled([
+        wantTickets ? fetchTickets() : Promise.resolve([] as Ticket[]),
+        wantFeedback ? fetchFeedback() : Promise.resolve([] as Feedback[]),
+      ]);
+
+      const load: StoreLoad = { tickets: 'ok', feedback: 'ok' };
+
+      if (tickets.status === 'fulfilled') {
+        ticketCache = tickets.value;
+      } else {
+        const err = tickets.reason;
+        const forbidden = err instanceof ApiError && err.isForbidden;
+        load.tickets = forbidden ? 'forbidden' : 'failed';
+        if (!forbidden) load.ticketError = err instanceof Error ? err.message : 'Could not load escalations.';
+      }
+
+      if (feedback.status === 'fulfilled') {
+        feedbackCache = feedback.value;
+      } else {
+        const err = feedback.reason;
+        const forbidden = err instanceof ApiError && err.isForbidden;
+        load.feedback = forbidden ? 'forbidden' : 'failed';
+        if (!forbidden) load.feedbackError = err instanceof Error ? err.message : 'Could not load ratings.';
+      }
+
+      // Hydrated means "we know what the server will tell us", which a deliberate 403
+      // satisfies as much as a 200 does. Only a real failure leaves us guessing.
+      hydrated = load.tickets !== 'failed' && load.feedback !== 'failed';
+      lastLoad = load;
       announce();
+      return load;
     } finally {
       inFlight = null;
     }
@@ -152,6 +212,11 @@ export async function hydrate(): Promise<void> {
 /** False until the first successful `hydrate()` — lets a view distinguish empty from unloaded. */
 export function isHydrated(): boolean {
   return hydrated;
+}
+
+/** Per-resource outcome of the last `hydrate()`. */
+export function getStoreLoad(): StoreLoad {
+  return lastLoad;
 }
 
 /** Subscribe to any store change. Returns an unsubscribe function. */

@@ -73,7 +73,7 @@ const QUICK_ACTIONS = [
 ];
 
 const SUGGESTIONS = [
-  'How many casual leaves do I have left?',
+  'How many earned leaves do I have left?',
   'When will my salary be credited?',
   'What does my health insurance cover?',
   'How do I claim internet reimbursement?',
@@ -281,14 +281,19 @@ export default function ChatPage() {
   const [faqs] = useState<FAQ[]>(DEFAULT_FAQS);
 
   const router = useRouter();
-  const { user, isLoading: authLoading, ssoEnabled } = useChatbotAuth();
+  const { user, isLoading: authLoading } = useChatbotAuth();
 
-  // Under SSO the backend rejects every call without a session, so an unsigned
-  // visitor would otherwise sit in front of a chat window where nothing works.
+  // No session, no chat — whatever the server's auth posture is.
+  //
+  // This was `ssoEnabled && !user`, which meant the guard only ran where Entra was
+  // configured. Everywhere else — the EC2 pilot included — an unsigned visitor got the
+  // full chat window, and the identity below filled the gap with a fabricated employee.
+  // So the deployment with the weakest authentication was also the one that showed a
+  // name and inbox belonging to nobody, and asked HR questions on their behalf.
   useEffect(() => {
     if (authLoading) return;
-    if (ssoEnabled && !user) router.replace('/login');
-  }, [authLoading, ssoEnabled, user, router]);
+    if (!user) router.replace('/login');
+  }, [authLoading, user, router]);
 
   const ctxRef = useRef<ConversationContext>({});
   /**
@@ -312,10 +317,15 @@ export default function ChatPage() {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Threads are stored per employee. Falls back to the demo identity only when
-  // the page is opened without a session, which is what the quick-login flow does.
-  const email = user?.email ?? 'employee@company.com';
-  const userName = user?.name ?? 'Ananya Sharma';
+  // Threads are stored per employee, keyed on the address the session was issued to.
+  //
+  // No fallback. These used to read `?? 'employee@company.com'` and `?? 'Ananya Sharma'`,
+  // so a page opened without a session greeted a person who does not work here and filed
+  // the conversation under an address nobody owns. An empty string is the honest value for
+  // "not signed in", and the guard above means it is never the value we render with: the
+  // early return below holds the page until the redirect lands.
+  const email = user?.email ?? '';
+  const userName = user?.name ?? '';
   /** Just the given name for the greeting — a full legal name reads like a letter. */
   const firstName = userName.trim().split(/\s+/)[0] ?? '';
 
@@ -590,6 +600,12 @@ export default function ChatPage() {
   const showIntro = messages.length <= 1;
 
   // -----------------------------------------------------------------------
+
+  // Held until the session is known, and held again if there is none: the effect above is
+  // redirecting to /login, and rendering the chat in the meantime is what used to flash a
+  // fabricated employee's name on screen. The skeleton is the same one the boot path shows,
+  // so this reads as loading rather than as an error.
+  if (authLoading || !user) return <BootSkeleton />;
 
   if (!booted) return <BootSkeleton />;
 

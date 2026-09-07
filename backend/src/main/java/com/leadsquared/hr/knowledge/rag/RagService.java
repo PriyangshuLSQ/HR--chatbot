@@ -9,6 +9,8 @@ import com.leadsquared.hr.knowledge.model.SourceKind;
 import com.leadsquared.hr.knowledge.claude.ChatMessage;
 import com.leadsquared.hr.knowledge.claude.ClaudeClient;
 import com.leadsquared.hr.knowledge.ollama.OllamaClient;
+import com.leadsquared.hr.knowledge.payroll.FunctionPayPlanService;
+import com.leadsquared.hr.knowledge.payroll.FunctionPayAdvisor;
 import com.leadsquared.hr.knowledge.ollama.OllamaStatus;
 import com.leadsquared.hr.knowledge.parse.DocumentParser;
 import com.leadsquared.hr.knowledge.parse.ImageTextExtractor;
@@ -51,8 +53,26 @@ public class RagService {
 
   private static final Logger log = LoggerFactory.getLogger(RagService.class);
 
-  /** How much retrieved text to hand the model. Keeps prompts inside a small model's context. */
-  private static final int MAX_CONTEXT_CHARS = 6000;
+  /**
+   * How much retrieved text to hand the model.
+   *
+   * <p>Was 6,000, and the comment said it kept prompts "inside a small model's context" — true
+   * when generation ran on a local 3B model, obsolete since it moved to the Claude API. It is
+   * ~1,500 tokens against a 1M window, and it, not {@link #TOP_K}, was the binding limit: chunks
+   * run 600-1,000 characters, so the budget ran out around the seventh passage and any further
+   * candidate was retrieved, ranked, then silently dropped by {@link #contextBlock}.
+   *
+   * <p>That is what refused a question whose answer was indexed. "How does US variable pay work"
+   * needs the plan overview AND the role table AND the slab table AND a worked example — four
+   * kinds of passage from a 131-chunk policy. Seven slots cannot hold them, so the model got the
+   * overview, said honestly that it did not have the tables, and the tables were in the corpus
+   * the whole time.
+   *
+   * <p>14,000 is ~3,500 tokens. It roughly doubles input cost per answer (~$0.006 to ~$0.012 at
+   * Sonnet 5 pricing) and is still a rounding error against the context window. Raise both this
+   * and TOP_K together or neither — that coupling is the whole point of this note.
+   */
+  private static final int MAX_CONTEXT_CHARS = 14000;
 
   /** Passages to pull from Qdrant before fusing with BM25. */
   private static final int DENSE_CANDIDATES = 200;
@@ -67,12 +87,13 @@ public class RagService {
    * correctly answered NOT_IN_DOCUMENTS, which reaches the employee as "I don't have a reliable
    * answer" about a number sitting in the corpus.
    *
-   * <p>Not raised further because {@link #MAX_CONTEXT_CHARS} is the binding limit, not this:
-   * these chunks run 600–1,000 characters, so the budget is exhausted around the seventh either
-   * way. Raising this alone adds candidates that {@link #contextBlock} then drops; genuinely
-   * widening the window means raising both, and paying for it on every question.
+   * <p>14 now, raised together with {@link #MAX_CONTEXT_CHARS} — separately they do nothing,
+   * because whichever is smaller decides. A policy question is usually answered inside one
+   * document, and a long policy answers it across several kinds of passage at once: overview,
+   * role table, slab table, worked example. Eight slots could not hold that set for the 131-chunk
+   * US variable pay policy, and the four spare slots went to the *India* policy instead.
    */
-  private static final int TOP_K = 8;
+  private static final int TOP_K = 14;
 
   /**
    * How much of the previous question a follow-up retry may carry.
@@ -258,6 +279,8 @@ public class RagService {
    * path of a question, which is why it can afford a different model from {@code claude}.
    */
   private final ImageTextExtractor imageText;
+  private final FunctionPayAdvisor functionPay;
+  private final FunctionPayPlanService payPlans;
 
   private final AtomicLong docSeq = new AtomicLong();
 
@@ -267,13 +290,20 @@ public class RagService {
       Retriever retriever,
       OllamaClient ollama,
       ClaudeClient claude,
-      ImageTextExtractor imageText) {
+      ImageTextExtractor imageText,
+      // Retrieval scoping only. A pay question resolves to one plan, and the other plans'
+      // policies are then demoted so an India Sales question is not answered out of the US
+      // document. rag depends on payroll and not the reverse, so this adds no cycle.
+      FunctionPayAdvisor functionPay,
+      FunctionPayPlanService payPlans) {
     this.store = store;
     this.qdrant = qdrant;
     this.retriever = retriever;
     this.ollama = ollama;
     this.claude = claude;
     this.imageText = imageText;
+    this.functionPay = functionPay;
+    this.payPlans = payPlans;
   }
 
   // -------------------------------------------------------------------------
@@ -850,8 +880,16 @@ public class RagService {
             : qdrant.searchDense(queryVector, DENSE_CANDIDATES, Retriever.COSINE_FLOOR);
     long searchedAt = System.nanoTime();
 
+    // Resolved from the query alone, not the conversation: retrieveOnce is also the follow-up
+    // retry path and has no history here. A follow-up that names no function therefore scopes
+    // nothing, which is the safe direction — it demotes less, never more.
+    String activePlan = functionPay.planKeyFor(query, List.of());
+    Map<String, String> documentOwners =
+        activePlan == null ? Map.of() : payPlans.documentOwners();
+
     Retriever.Result retrieval =
-        retriever.retrieve(query, snapshot, denseScores, queryVector != null, TOP_K);
+        retriever.retrieve(
+            query, snapshot, denseScores, queryVector != null, TOP_K, activePlan, documentOwners);
     long rankedAt = System.nanoTime();
     logRetrieval(label, startedAt, embeddedAt, searchedAt, rankedAt, retrieval);
     return retrieval;
@@ -1037,6 +1075,12 @@ public class RagService {
          Asked "I have 34 days of earned leave, how many will I lose", the correct answer is "up to **30 days** may be carried forward; anything above that lapses on 31 December" — NOT "you will lose 4 days".
          Asked "I want 3 weeks remote", the correct answer is "remote work is allowed for up to **30 days** a year with manager approval; beyond that needs HRBP sign-off" — NOT "your 3 weeks is within the limit".
          This holds even though the arithmetic looks trivial: the figure you were given may be stale, may exclude pending requests, or may be a different leave type than the rule covers, and a confident wrong total tells someone they have leave or money they do not.
+         The second exception: an explicitly hypothetical projection, framed by the employee, on figures they supply. When the question says "if", "suppose", "assuming" or "what would it be" AND gives you the changed numbers, do the arithmetic and give them the figure. "If my fixed CTC rises 15% and my variable stays 20% of CTC, what is my new variable target?" is a fair question about their own arithmetic — they are not asking what they are owed, they are asking what 20% of a larger number comes to, and refusing it is unhelpful pedantry.
+         Four conditions, all required. State the assumptions you used, in their terms. Show the figures you worked from, not only the result. Call it a projection on their numbers — never their entitlement, and never a figure HR has agreed. And if their assumption disagrees with the EMPLOYEE RECORD, say so and give both: someone assuming their variable is 20% when the record says 9.5% needs to know that before they plan around it.
+         This exception is narrow, and two things fall outside it however the question is worded.
+         First, it requires the employee's OWN conditional framing — the words "if", "suppose", "assuming", "what would it be". "I want 3 weeks remote" and "I have 34 days of leave" are not hypotheticals; they are statements about their real situation, and they stay under the prohibition above no matter how naturally a projection would follow.
+         Second, and this holds even inside a genuine hypothetical: never convert a duration or quantity the employee names in order to weigh it against a policy limit, and never state whether something is or is not within one. "3 weeks is 15 working days" is already the forbidden step, and "yes, that would be within the limit" is the forbidden answer — both, even when correct, because a wrong one tells an employee they may take leave they cannot. Quote the limit and let them apply it.
+         The test to apply: would a wrong answer tell them what they HAVE, or what they are ALLOWED? Then refuse, as above — this covers every eligibility, qualification and compliance question. Would it merely restate their own arithmetic on figures they supplied? Then answer it.
       4. A table answers ONLY for the rows it contains. When the employee names a grade, band, level, city, category or any other row — "grade X4", "L5", "Bengaluru" — find that exact row. If it is not in the extracts, say the figure for it is not available and name what you can see instead ("the table I have covers X6 to X11"). NEVER answer with the value from a neighbouring row, the row above or below, or the nearest match, and never state a figure for a row you cannot see. A retrieved table is often a fragment: the rows before it were cut off, its header may be missing, and a grade being absent from it means you were given the wrong part of the table — it does not mean the grade has no entitlement. Answering "INR 50,00,000" for a grade whose actual row says INR 16,00,000 is the worst thing you can do here, because it is specific, confident, and cites a real table.
       5. Answer the question that was actually asked. The extracts are retrieved by similarity, so they often include a NEARBY question that is not the one asked — "moving roles mid-year" when the employee asked about RESIGNING mid-year, "joining" when they asked about "leaving". Answering the neighbour is a wrong answer, not a partial one. Check each extract against the actual question before you use it, and ignore the ones that address something else.
       6. Write the answer in your own words. Never copy sentences, headings, numbered lists or FAQ titles out of an extract, and never start with a document title. Summarise.

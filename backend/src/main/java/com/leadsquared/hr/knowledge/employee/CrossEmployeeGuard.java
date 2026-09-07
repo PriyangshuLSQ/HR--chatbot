@@ -51,6 +51,11 @@ public final class CrossEmployeeGuard {
               // "average incentive in the sales team" was not even tested.
               + "|incentive|incentives"
               + "|earn|earns|earner|earners|earning|earnings|paid"
+              // Added with the salary-structure import. A colleague's HRA or basic is exactly as
+              // private as their CTC, and until these were here "what is Rohit's HRA" named a
+              // personal field the guard did not recognise — so it was not even tested for.
+              + "|hra|house rent|basic|special allowance|provident fund|\\bpf\\b"
+              + "|professional tax|gratuity"
               + "|grade|designation|band|leave balances?|balances?|leaves? left|attendance"
               + "|rating|ratings"
               + "|appraisal|performance|pms|tenure|joining date|probation|manager|reportee"
@@ -286,10 +291,66 @@ public final class CrossEmployeeGuard {
    * paired with {@link #PERSONAL_FIELD} below so a policy question mentioning a capitalised
    * insurer ("what does Oriental Insurance cover") is not read as naming a colleague.
    */
-  private static final Pattern PROPER_NAME_TARGET =
-      Pattern.compile(
-          "\\b[A-Z][a-z]{2,}(?:\\s+[A-Z][a-z]+)?'s\\b" // Ramesh's, Priya Sharma's
-              + "|\\b(?:of|for|about)\\s+[A-Z][a-z]{2,}\\b"); // of Priya, for Ramesh
+  private static final Pattern PROPER_NAME_POSSESSIVE =
+      Pattern.compile("\\b([A-Z][a-z]{2,}(?:\\s+[A-Z][a-z]+)?)'s\\b"); // Ramesh's, Priya Sharma's
+
+  private static final Pattern PROPER_NAME_PREPOSITION =
+      // Captures the whole capitalised run, not just the first word, so "for Net New MRR" can be
+      // judged on "Net New" rather than on "Net" alone. See looksLikePersonalName below.
+      Pattern.compile("\\b(?:of|for|about)\\s+([A-Z][a-z]{2,}(?:\\s+[A-Z][a-z]+)*)\\b");
+
+  /**
+   * Capitalised words that policy questions use and parents do not.
+   *
+   * <p>{@link #PROPER_NAME_PREPOSITION} is the weakest pattern in this class: "of|for|about"
+   * followed by a capitalised word describes a colleague in "the CTC of Priya" and a pay slab in
+   * "the slab for Net New MRR", and nothing in the sentence separates the two. It also ran
+   * without any exclusion list at all, while the possessive branch beside it consulted {@link
+   * #IMPERSONAL_POSSESSIVES} — so the reopened bug was the same one, one pattern along:
+   *
+   * <pre>  "What is the US variable pay slab for Net New MRR?"
+   *   -> "for Net" matched, "pay" is a PERSONAL_FIELD, and a question about a published
+   *      commission table was answered with the privacy notice.</pre>
+   *
+   * <p>The rule is that a person's name contains none of these words, so every word in the
+   * captured run is checked and any hit means the run names a thing. That fails toward
+   * answering, which is the correct direction here and is safe for the reason in the class
+   * comment: {@link EmployeeDataService} cannot load a colleague's record whatever this method
+   * returns. A miss costs the privacy notice on a question that gets refused anyway; a false
+   * positive costs an employee a straight answer about published policy.
+   *
+   * <p>Months and weekdays are in the list and are also real given names. Deliberate — "the
+   * accrual for April" is the question people ask, and if somebody genuinely asks about a
+   * colleague called April the data layer still has nothing to give them.
+   */
+  private static final Set<String> POLICY_VOCABULARY =
+      Set.of(
+          // Pay structure and its components.
+          "net", "new", "gross", "total", "basic", "special", "house", "rent", "allowance",
+          "provident", "fund", "professional", "tax", "variable", "fixed", "target", "actual",
+          "payout", "slab", "slabs", "band", "bands", "grade", "grades", "level", "tier",
+          "plan", "policy", "scheme", "bonus", "incentive", "commission", "gratuity",
+          "encashment", "reimbursement", "relocation", "brokerage", "salary", "compensation",
+          "ctc", "payroll", "deduction", "contribution", "increment", "appraisal", "promotion",
+          // Functions and the metrics they carry quota on.
+          "sales", "marketing", "engineering", "finance", "product", "support", "success",
+          "presales", "operations", "revenue", "bookings", "retention", "churn", "quota",
+          "achievement", "attainment", "pipeline", "renewal", "upsell",
+          // Leave and the employment lifecycle.
+          "earned", "casual", "sick", "maternity", "paternity", "bereavement", "sabbatical",
+          "notice", "probation", "confirmation", "resignation", "separation", "onboarding",
+          "insurance", "mediclaim", "coverage",
+          // Geography, which is what actually decides which policy applies.
+          "america", "american", "europe", "emea", "apac", "singapore", "dubai", "bengaluru",
+          "bangalore", "mumbai", "noida", "hyderabad", "chennai", "delhi", "gurgaon", "pune",
+          // Periods.
+          "january", "february", "march", "april", "june", "july", "august", "september",
+          "october", "november", "december", "monday", "tuesday", "wednesday", "thursday",
+          "friday", "saturday", "sunday", "annual", "monthly", "quarterly", "fiscal",
+          "financial", "half", "full",
+          // Document furniture, which is how people cite the thing they are asking about.
+          "section", "clause", "annexure", "appendix", "schedule", "exhibit", "table",
+          "terms", "conditions", "handbook", "manual");
 
   /**
    * A question about a published band rather than about a person.
@@ -356,7 +417,7 @@ public final class CrossEmployeeGuard {
     if (!personalField) return List.of();
 
     // Original casing: capitalisation is what distinguishes a person's name from a common noun.
-    if (PROPER_NAME_TARGET.matcher(question).find()) return List.of(Reason.NAMED_IDENTIFIER);
+    if (namesSomeoneByProperName(question)) return List.of(Reason.NAMED_IDENTIFIER);
 
     // The same thing lower-cased, which is how it usually arrives.
     if (namesSomeonePossessively(q)) return List.of(Reason.NAMED_IDENTIFIER);
@@ -414,10 +475,61 @@ public final class CrossEmployeeGuard {
   }
 
   /** Whether a possessive in the question refers to a person rather than to a thing. */
+  /**
+   * A capitalised name, with the elided-"is" exclusion the lower-cased check already had.
+   *
+   * <p>This existed as a bare regex, and that reopened the bug {@link #IMPERSONAL_POSSESSIVES}
+   * was written to close — just one case up. {@code namesSomeonePossessively} consults that set
+   * and is correct; this check ran first, on the original casing, and returned before it. So
+   * "what's my payout?" was allowed and <b>"What's my payout?" was refused</b>: the same question,
+   * decided by whether the employee capitalised the first letter. The existing regression test
+   * passed throughout because every case in it is lower-cased.
+   *
+   * <p>A two-word capture used to be treated as a real name without consulting the set, on the
+   * grounds that "Priya Sharma" is nobody's sentence opener. True, but it is not only sentence
+   * openers that get capitalised: "the Provident Fund's contribution rate" is two words and no
+   * more a colleague than "Net New" is. Both captures now go through {@link
+   * #looksLikePersonalName}, which checks every word in the run.
+   */
+  private static boolean namesSomeoneByProperName(String question) {
+    Matcher m = PROPER_NAME_POSSESSIVE.matcher(question);
+    while (m.find()) {
+      if (looksLikePersonalName(m.group(1))) return true;
+    }
+    Matcher p = PROPER_NAME_PREPOSITION.matcher(question);
+    while (p.find()) {
+      if (looksLikePersonalName(p.group(1))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether a run of capitalised words is somebody's name rather than the name of a thing.
+   *
+   * <p>A name carries no business vocabulary, so one recognised word anywhere in the run is
+   * enough to settle it: "Net New" is a metric, "Provident Fund" is a deduction, "Priya Sharma"
+   * is a person. Both sets are consulted — {@link #IMPERSONAL_POSSESSIVES} for the elided "is"
+   * that makes "What's my payout?" look like a name, {@link #POLICY_VOCABULARY} for the words
+   * policy questions capitalise.
+   */
+  private static boolean looksLikePersonalName(String capitalisedRun) {
+    for (String word : capitalisedRun.split("\\s+")) {
+      String w = word.toLowerCase(Locale.ROOT);
+      if (IMPERSONAL_POSSESSIVES.contains(w) || POLICY_VOCABULARY.contains(w)) return false;
+    }
+    return true;
+  }
+
   private static boolean namesSomeonePossessively(String lowercased) {
     Matcher m = ANY_POSSESSIVE.matcher(lowercased);
     while (m.find()) {
-      if (!IMPERSONAL_POSSESSIVES.contains(m.group(1))) return true;
+      String owner = m.group(1);
+      // POLICY_VOCABULARY as well as IMPERSONAL_POSSESSIVES: casing is gone by the time this
+      // runs, so "the Provident Fund's employer share" arrives as "fund's" and the thing that
+      // owns the share is a deduction, not a colleague. Same for "the plan's slab" and "the
+      // policy's cap" — the possessive is real, the owner is not a person.
+      if (IMPERSONAL_POSSESSIVES.contains(owner) || POLICY_VOCABULARY.contains(owner)) continue;
+      return true;
     }
     return false;
   }

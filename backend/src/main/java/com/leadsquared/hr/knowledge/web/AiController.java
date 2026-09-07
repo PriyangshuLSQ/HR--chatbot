@@ -46,8 +46,9 @@ public class AiController {
    *
    * <p>Was 6, which is two exchanges — the assistant forgot the start of its own conversation.
    * That ceiling dated from answering with a small local model where context was genuinely
-   * scarce; on {@code claude-haiku-4-5} the whole window is 200k tokens and forty turns is a
-   * rounding error against it.
+   * scarce; the current models have windows of 200k ({@code claude-haiku-4-5}) to 1M
+   * ({@code claude-sonnet-5}, the default), and forty turns is a rounding error against
+   * either.
    *
    * <p>This is now a bound on the <em>request</em>, not the policy. How much conversation the model
    * actually sees is decided by {@code RagService.MAX_HISTORY_CHARS}, as a character budget — turns

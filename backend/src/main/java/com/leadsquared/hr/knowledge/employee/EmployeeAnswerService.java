@@ -11,6 +11,7 @@ import com.leadsquared.hr.knowledge.security.CurrentUser;
 import com.leadsquared.hr.knowledge.security.SignedInUser;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.regex.Pattern;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -102,6 +103,22 @@ public class EmployeeAnswerService {
     this.variablePay = variablePay;
   }
 
+  /**
+   * The asker wanting their own variable pay figure used, rather than one they type.
+   *
+   * <p>Two shapes, and both were asked in the same conversation: naming the field possessively
+   * ("what will <em>my</em> variable payout be") and asking for it outright ("take my variable pay
+   * amount <em>from records</em>"). Anything vaguer is left alone — a policy question must stay
+   * answerable without reading anybody's record.
+   */
+  private static final Pattern OWN_FIGURES_REQUEST =
+      Pattern.compile(
+          "\\bmy\\s+(?:annual\\s+)?(?:variable(?:\\s+pay)?|vp|payout|incentive)\\b"
+              + "|\\bfrom\\s+(?:my\\s+)?records?\\b"
+              + "|\\b(?:take|use|pull|fetch)\\s+my\\b"
+              + "|\\bas\\s+per\\s+my\\s+record",
+          Pattern.CASE_INSENSITIVE);
+
   /** What the routing decided: either a finished answer, or context to answer with. */
   private record Routing(KnowledgeAnswer shortCircuit, String personalContext) {
     static Routing answerNow(KnowledgeAnswer answer) {
@@ -176,7 +193,28 @@ public class EmployeeAnswerService {
     // invents; it reads no record and names no colleague, so refusing it would treat a policy as
     // if it were personal data. The cross-employee guard has already run above, and this path
     // touches no employee data at all.
-    Optional<String> functionPayContext = functionPay.contextFor(question, prior);
+    // ... with one exception, added because refusing it was the wrong kind of correct. Asked
+    // "what will my variable payout be" and then, plainly, "take my variable pay amount from
+    // records", the assistant said it could not — while the figure sat on the record it had
+    // already been given permission to read. Nobody else's data is involved: it is the asker's
+    // own annual variable target, used as the multiplicand for achievement figures they typed
+    // themselves.
+    //
+    // Narrow on purpose. The record is read only when the question asks for their own figure, so
+    // "how does the US plan work" still touches nothing — which is what keeps a published policy
+    // explorable by anyone.
+    BigDecimal ownVariableTarget = null;
+    if (user != null && OWN_FIGURES_REQUEST.matcher(question).find()) {
+      ownVariableTarget =
+          employees
+              .myRecord(user)
+              .map(Employee::compensation)
+              .map(Employee.Compensation::variableTargetAmount)
+              .orElse(null);
+    }
+
+    Optional<String> functionPayContext =
+        functionPay.contextFor(question, prior, ownVariableTarget);
 
     // Which of the two the turn is about, decided by what only one of them has.
     //

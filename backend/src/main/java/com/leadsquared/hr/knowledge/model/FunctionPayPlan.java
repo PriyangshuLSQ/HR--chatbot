@@ -44,6 +44,23 @@ public record FunctionPayPlan(
     List<Slab> slabs,
     List<Role> roles,
     List<OrgValue> orgValues,
+    /**
+     * Knowledge-base document ids this plan is the authoritative version of.
+     *
+     * <p>Retrieval uses it to stop one plan's policy being cited for another's question. An India
+     * Sales question was answered with six of eight extracts from the US policy, because that
+     * document happens to contain sentences shaped exactly like the question ("Pays out example
+     * (over-achievement): A Sales Executive has a total annual VP of $120,000…") while the India
+     * Sales policy phrases the same rule differently. Similarity picked the wrong country and the
+     * employee was shown its citations.
+     *
+     * <p>Recorded explicitly rather than inferred. Guessing geography from a filename works until
+     * someone renames a file, and guessing from currency symbols in the text works until a policy
+     * quotes a figure in the other currency — both are the kind of inference that has already
+     * produced three separate bugs in this codebase. Empty means "owns no document", which is
+     * neutral: unowned documents are never demoted.
+     */
+    List<String> sourceDocumentIds,
     String updatedAt,
     String updatedBy) {
 

@@ -13,10 +13,14 @@ server:
         # It is also why CSRF tokens are not wired through every fetch yet — see
         # SecurityConfig.
         same-site: lax
-        # Set to true behind TLS. Left false so sign-in works over plain http on
-        # localhost; a secure cookie is simply not sent there, which looks like a
-        # login loop rather than an error.
-        secure: false
+        # MUST be true behind TLS, and it is now an environment setting rather than a
+        # code edit — a deployment that has to change a committed default in order to be
+        # secure is a deployment that ships insecure.
+        #
+        # Default false because localhost is plain http and a secure cookie is simply not
+        # sent there, which presents as a login loop rather than an error. Set
+        # COOKIE_SECURE=true wherever there is a certificate in front; see DEPLOY.md.
+        secure: ${COOKIE_SECURE:false}
 
 spring:
   application:
@@ -108,6 +112,28 @@ hr:
     # Where to send the browser after a successful sign-in.
     success-path: /chat
 
+    # TEMPORARY — the Entra stand-in, until the Microsoft sign-in approval lands.
+    #
+    # Declared here with an environment placeholder, rather than only in the gitignored
+    # application-local.yml, because the deployed containers have no such file: a setting that
+    # can only be reached by editing a file that is not in the image cannot be used where it is
+    # actually needed. Blank is OFF, which is the committed default and the state everywhere
+    # that has not deliberately set it.
+    #
+    # What it is NOT: authentication turned off. The filter chain, the role rules and every
+    # endpoint's per-request checks all still apply — only the FIRST step is substituted, so one
+    # configured address asserts who you are instead of Microsoft. POST /api/auth/dev takes no
+    # email from the caller; it reads this value, so it grants exactly one identity and nothing
+    # else.
+    #
+    # It still cannot reach a real deployment: hr.auth.require=true refuses to start while this
+    # is set. Sessions it creates are recorded as method `dev`, so which sign-ins Microsoft
+    # actually vouched for stays visible afterwards.
+    #
+    # Unset DEV_SIGN_IN_AS the moment Microsoft sign-in works.
+    dev-sign-in-as: ${DEV_SIGN_IN_AS:}
+    dev-sign-in-name: ${DEV_SIGN_IN_NAME:}
+
 knowledge:
   # Ollama is now an EMBEDDING service only. Answer writing moved to the Claude API
   # below; what could not move is the embedder, because the Qdrant collections are
@@ -141,29 +167,42 @@ knowledge:
     # assistant falls back to extractive answers, exactly as it did when no chat
     # model was pulled.
     api-key: ${ANTHROPIC_API_KEY:}
-    # claude-haiku-4-5, because latency and cost were chosen over answer quality: it is
-    # the fastest current model and a fifth of Opus 5's price ($1/$5 per MTok against
-    # $5/$25), and this task — restate five retrieved passages in a few sentences, or
-    # decline — is well within it.
+    # claude-sonnet-5, moved here from claude-haiku-4-5 on 23 Aug 2026. Haiku was chosen
+    # when the task was read as "restate five retrieved passages or decline", which it
+    # handled. It stopped being the whole task once the grounding prompt was allowed to
+    # project an employee's own hypothetical ("if my CTC rises 15%, what is 20% of it"),
+    # because that asks the model for a rupee figure somebody will plan around.
     #
-    # Most of the speed is not the model being small, it is that Haiku 4.5 does not
-    # think by default. On Opus 5 thinking is on unless disabled, and it was costing
-    # ~4.6s before the first visible token; here there is no such phase.
+    # The measurement that decided it, same prompt and corpus, six runs each:
+    #   - arithmetic on that projection: Haiku 4/6 correct, Sonnet 5 6/6. Haiku's misses
+    #     were 806,000 x 1.15 = 927,900 — off by 1,000, then compounded into the target,
+    #     and indistinguishable from a right answer on the page.
+    #   - the refusal cases held on both, and Sonnet worded them better.
+    #   - time to first token: 0.8-1.2s on Haiku, 1.4-1.7s on Sonnet. Total generation
+    #     overlapped (3.5-3.8s against 2.7-4.4s), so the half second of TTFT is the whole
+    #     latency cost, and it buys adaptive thinking.
     #
-    # Two things this model gives up, both of which the code handles rather than
-    # breaks on:
-    #   - `effort` does not exist on it and returns a 400. Not sent — see
+    # Cost is NOT the 3x the price list implies ($3/$15 per MTok against $1/$5; $2/$10
+    # under intro pricing until 31 Aug 2026). Prompt caching starts working here and did
+    # not on Haiku — measured `cache=read 3021` against `cache=read 0`, because Haiku
+    # wants a 4096-token cacheable prefix and this system prompt is smaller. Cached input
+    # bills at about a tenth, so a typical answer runs ~$0.0062 against ~$0.0048: about
+    # 1.3x. Output tokens are the only true 3x and there are only ~200 of them.
+    #
+    # Two knobs this model turns back on, both inert under Haiku:
+    #   - `effort` is accepted, so the setting below is live rather than dropped. See
     #     ClaudeClient.supportsEffort.
-    #   - The minimum cacheable prefix is 4096 tokens, against 512 on Opus 5. This
-    #     system prompt is ~1.2k, so prompt caching silently stops applying: no error,
-    #     just `cache=read 0` in the generate log. Cheaper per token anyway, but it
-    #     means the caching knob below is inert on this model.
+    #   - `cache-system-prompt` below actually caches.
     #
-    # claude-opus-5 is the switch back if the grounding cases start failing. The two
-    # hard ones (answering the *nearest* question rather than the one asked, and copying
-    # passages verbatim) are what a smaller model fails first — re-run them from
-    # docs/AI-SETUP.md rather than assuming this model holds the contract.
-    model: ${CLAUDE_MODEL:claude-haiku-4-5}
+    # Thinking is adaptive here and is never configured in code (see ClaudeClient) — that
+    # is where the TTFT goes. Do not "fix" it by disabling thinking; docs/AI-SETUP.md
+    # explains why.
+    #
+    # claude-opus-5 is the escalation if the grounding cases start failing. And none of
+    # this makes the model a calculator: it is measurably better at arithmetic, not
+    # reliable at it, and a figure an employee plans around still belongs in
+    # VariablePayCalculator where it is tested against HR's published examples.
+    model: ${CLAUDE_MODEL:claude-sonnet-5}
     # Ceiling on ONE response, covering thinking and the visible answer together.
     #
     # Deliberately not the 250 the local model was given. On a thinking model the
@@ -211,12 +250,23 @@ knowledge:
     # the cheapest adequate model; this is a per-upload cost where accuracy matters more,
     # and the two should be free to differ.
     #
-    # Worth knowing before lowering it: claude-haiku-4-5 downsamples images to 1568px on
-    # the long edge, against 2576px on claude-opus-5 and claude-sonnet-5. On a dense
-    # scanned page that is the difference between small print being read and being
-    # guessed at. Haiku is the default because most images here are screenshots rather
-    # than dense scans; switch to claude-opus-5 if scans read badly.
-    model: ${OCR_MODEL:claude-haiku-4-5}
+    # claude-sonnet-5 since 23 Aug 2026, moved with the answer model but for a different
+    # reason — resolution, not arithmetic.
+    #
+    # claude-haiku-4-5 downsamples images to 1568px on the long edge; opus and sonnet use
+    # 2576px. ClaudeVisionClient.MAX_EDGE_PX has always sent 2576, so under Haiku a
+    # quarter of every page's detail was uploaded and then discarded at the far end. On a
+    # screenshot that costs nothing; on a dense scanned page it is the difference between
+    # small print being read and being guessed at, and an OCR mistake is worse than a bad
+    # answer because it is indexed once and then silently quoted back forever.
+    #
+    # Cost follows the same shape as the answer model: 3x the sticker, but this is a
+    # per-upload cost paid by an admin with a progress indicator, not per question. At the
+    # 100-image cap budget roughly $1.80 against Haiku's ~60 cents.
+    #
+    # claude-opus-5 is the escalation, though it shares Sonnet's 2576px so the gain would
+    # be reading quality rather than resolution.
+    model: ${OCR_MODEL:claude-sonnet-5}
     # Hard cap per upload. A 200-slide deck saved as .docx would otherwise be 200 vision
     # calls inside one HTTP request. Images past the cap are reported as skipped, not
     # silently dropped.
@@ -227,7 +277,8 @@ knowledge:
     # bounded separately at 8 in flight (ClaudeVisionClient.OCR_CONCURRENCY), which is what stops
     # a long document turning into rate-limit failures instead of a slightly longer wait.
     #
-    # Budget at the cap: ~13 waves of 8, so about a minute of OCR and roughly 60 cents. The 15 MB
+    # Budget at the cap: ~13 waves of 8, so about a minute of OCR and roughly $1.80 on
+    # claude-sonnet-5 (~60 cents on claude-haiku-4-5). The 15 MB
     # per-file limit is usually the tighter one for scans — 100 pages only fit at ~150 KB a page.
     max-images-per-document: ${OCR_MAX_IMAGES:100}
     # Images below this are skipped unread. Logos, bullet glyphs and signature squiggles

@@ -6,6 +6,7 @@ import com.leadsquared.hr.knowledge.store.ThreadRepository;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -43,19 +44,33 @@ public class ThreadController {
   @GetMapping
   public ThreadList list() {
     String owner = currentUser.require().email();
-    return new ThreadList(threads.findByOwnerOrderByUpdatedAtDesc(owner));
+    // Newest MAX_THREADS only. The collection now holds more than this — sync stopped
+    // deleting — but the sidebar shows a fixed window and the client would otherwise
+    // download an entire history to render it.
+    return new ThreadList(
+        threads.findByOwnerOrderByUpdatedAtDesc(owner, PageRequest.of(0, MAX_THREADS)));
   }
 
   /** The client sends only its threads; who they belong to is not its call. */
   public record ThreadSync(List<ChatThread> threads) {}
 
   /**
-   * Replaces the signed-in employee's threads with what the client holds.
+   * Upserts the threads the client is holding. Anything it is not holding is left alone.
    *
-   * <p>Whole-set replacement rather than per-thread patching, because the chat
-   * window's state <em>is</em> the thread list — it edits titles, prepends new
-   * conversations and drops the oldest past the cap. Reconciling that as a diff
-   * would be more code and more ways to leave the two out of step.
+   * <p><b>This used to delete first, and that was destroying chat history.</b> The old
+   * implementation called {@code deleteByOwner} and then saved the incoming list, which the client
+   * caps at 20 ({@code threads.slice(0, 20)} in the chat page). So conversation 21 was not aged
+   * out of the sidebar — it was erased from the database. Measuring conversation volume is what
+   * exposed it: a Tuesday that had already happened kept shrinking, 14 threads to 12 to 10, as
+   * new conversations were started on the Friday.
+   *
+   * <p>Saving without deleting keeps the client's cap as what it reads like — a display window —
+   * while the server retains the history behind it. {@code save} is an upsert on {@code @Id}, so
+   * an edited title or a new turn still overwrites the stored copy; only the deletion is gone.
+   *
+   * <p>Nothing calls for a delete: the chat UI has no way to remove a conversation. If one is
+   * added, it needs an explicit endpoint that names the thread — not an absence in a sync body,
+   * which is indistinguishable from a client that simply has not loaded it.
    */
   @PutMapping
   public ResponseEntity<?> sync(@RequestBody ThreadSync body) {
@@ -71,7 +86,6 @@ public class ThreadController {
             .limit(MAX_THREADS)
             .toList();
 
-    threads.deleteByOwner(owner);
     if (!owned.isEmpty()) threads.saveAll(owned);
 
     return ResponseEntity.ok(Map.of("ok", true, "count", owned.size()));

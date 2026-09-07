@@ -146,3 +146,51 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+
+// ---------------------------------------------------------------------------
+// Employee extract import
+// ---------------------------------------------------------------------------
+
+/** What the import did, for reconciliation. Mirrors EmployeeImportService.ImportReport. */
+export interface EmployeeImportReport {
+  imported: number;
+  masterRows: number;
+  compensationMatched: number;
+  leaveMatched: number;
+  attendanceMatched: number;
+  unresolvable: number;
+  emailDomainRewrite: string | null;
+  /** A workbook missing, or IDs in one file and absent from another. Never fatal. */
+  warnings: string[];
+}
+
+export interface EmployeeDataStatus {
+  recordCount: number;
+}
+
+export async function fetchEmployeeDataStatus(): Promise<EmployeeDataStatus> {
+  const res = await fetch('/api/knowledge/employees/status', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Could not read employee data status (${res.status})`);
+  return (await res.json()) as EmployeeDataStatus;
+}
+
+/**
+ * Re-reads the extract workbooks and replaces the employee collection.
+ *
+ * No body: the server falls back to its configured directory, which keeps the path to
+ * 5,000 people's compensation out of the browser, the URL and anyone's shell history.
+ *
+ * There was no way to do this from the console at all until now — the endpoint existed and
+ * nothing called it, so refreshing an extract meant an engineer with devtools open. That is
+ * also why a column added to the importer could sit unused: the code shipped and the data
+ * never moved.
+ */
+export async function importEmployeeExtract(): Promise<EmployeeImportReport> {
+  const res = await fetch('/api/knowledge/employees/import', { method: 'POST' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Import failed (${res.status})`);
+  }
+  return (await res.json()) as EmployeeImportReport;
+}

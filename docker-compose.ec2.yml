@@ -1,0 +1,87 @@
+# Overlay for the shared EC2 host (13.206.96.214). Use WITH the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ec2.yml up -d --build
+#
+# This host already runs an unrelated, older build of the project (people-insights-frontend
+# / -backend on MySQL) plus its MySQL and Mongo containers. None of them are touched:
+#
+#   - Ports move to 3001 / 8081, because the old build holds 3000 / 8080.
+#   - Mongo is the container already on the box, reused rather than replaced. The base
+#     file's mongo service is disabled and the existing one is joined to this network by
+#     name (see the runbook), so no data is duplicated and none is moved.
+#   - Sign-in stays off. Entra cannot be used here: Microsoft only accepts a plain-http
+#     redirect URI for localhost, so http://13.206.96.214:3001 cannot be registered as a
+#     callback. Running open is a deliberate choice for a dummy-data pilot — restrict the
+#     security group rather than relying on the app.
+#
+# Memory matters on this box: 7 GB total, already ~2 GB in use by the other stack, and it
+# has to build as well as run. Every service here is capped.
+
+services:
+  # Not used: the host's own mongo container is joined to this network instead.
+  mongo:
+    profiles: ["unused-on-this-host"]
+
+  qdrant:
+    mem_limit: 1g
+
+  ollama:
+    # nomic-embed-text is ~0.3 GB resident once warm. The cap is for the runtime around it
+    # and to stop a second model being pulled into a box that has no room for one.
+    mem_limit: 2g
+
+  ollama-pull:
+    mem_limit: 512m
+
+  backend:
+    # !override, not a plain key: compose merges lists across files, so without it this
+    # publishes 8080 as well as 8081 — and 8080 belongs to the older stack, so the bind
+    # fails and the service never starts.
+    ports: !override
+      - "8081:8080"
+    depends_on: !reset
+      qdrant:
+        condition: service_started
+      ollama-pull:
+        condition: service_started
+    environment:
+      # The container already on the host, reachable by name once it is attached to this
+      # compose network. Not 127.0.0.1: inside a container that is the container itself,
+      # and the host's published 27017 is bound to loopback only.
+      MONGODB_URI: mongodb://people-insights-mongo:27017
+      MONGODB_DB: hr_cockpit
+
+      # Sign-in off, as decided. Both lines are load-bearing: application.yml declares the
+      # azure-ad registration unconditionally and Spring validates it at startup, so
+      # without the exclusion the service does not run open — it fails to boot with
+      # "Client id of registration 'azure-ad' must not be empty".
+      SPRING_AUTOCONFIGURE_EXCLUDE: org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientAutoConfiguration
+      AUTH_REQUIRED: "false"
+      APP_BASE_URL: http://13.206.96.214:3001
+
+      # TEMPORARY — the Entra stand-in, until Microsoft sign-in approval lands. Compose reads
+      # .env for interpolation but does not inject it into containers, so these have to be
+      # named explicitly or the property stays blank and the endpoint 404s.
+      DEV_SIGN_IN_AS: ${DEV_SIGN_IN_AS:-}
+      DEV_SIGN_IN_NAME: ${DEV_SIGN_IN_NAME:-}
+
+      # The HR extract already sitting on the host, mounted read-only below.
+      # NOT under /data: the base file mounts ./data at /data read-only, and Docker cannot
+      # create a mountpoint inside a read-only mount — the container fails to start with
+      # "make mountpoint /data/hr-extract: read-only file system".
+      HR_EXTRACT_DIR: /hr-extract
+    volumes:
+      - /home/ec2-user/robin-insights/data:/hr-extract:ro
+    mem_limit: 2g
+
+  frontend:
+    build:
+      args:
+        # Unchanged from the base file, and correct: this is the address INSIDE the compose
+        # network, where the backend still listens on 8080. Only the host-side publish
+        # moved to 8081. Getting this wrong shows up as a UI that loads while every /api
+        # call fails with ECONNREFUSED.
+        KNOWLEDGE_API_URL: http://backend:8080
+    ports: !override
+      - "3001:3000"
+    mem_limit: 512m

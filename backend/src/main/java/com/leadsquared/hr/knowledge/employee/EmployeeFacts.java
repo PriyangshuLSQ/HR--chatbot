@@ -78,6 +78,19 @@ public final class EmployeeFacts {
         money(out, "Monthly gross (before employee deductions)", pay.monthlyGross(), unit);
         money(out, "Monthly in-hand estimate (after employee PF and professional tax)",
             pay.monthlyInHand(), unit);
+
+        // The salary structure. Emitted only where the extract carried it, so a record imported
+        // before these columns were mapped renders exactly as it did rather than a column of
+        // blanks — and the model is never handed an empty label to reason from.
+        money(out, "Total target CTC (annual, fixed + variable at 100%)", pay.totalTargetCtc(), unit);
+        money(out, "Monthly CTC", pay.monthlyCtc(), unit);
+        money(out, "Basic (monthly)", pay.basicMonthly(), unit);
+        money(out, "HRA (monthly)", pay.hraMonthly(), unit);
+        money(out, "Special allowance (monthly)", pay.specialAllowanceMonthly(), unit);
+        money(out, "Employer PF contribution (monthly)", pay.employerPfMonthly(), unit);
+        money(out, "Gratuity provision (monthly)", pay.gratuityProvisionMonthly(), unit);
+        money(out, "Employee PF deduction (monthly)", pay.employeePfDeduction(), unit);
+        money(out, "Professional tax (monthly)", pay.professionalTax(), unit);
       }
       if (fields.contains(PersonalDataIntent.VARIABLE_PAY)) {
         out.append("\nVariable pay:\n");

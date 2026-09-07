@@ -51,7 +51,7 @@ export function SkeletonStatCard() {
 
 export function SkeletonStatCards() {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(250px, 100%), 1fr))', gap: '1.5rem' }}>
       {[1, 2, 3, 4].map((i) => (
         <SkeletonStatCard key={i} />
       ))}

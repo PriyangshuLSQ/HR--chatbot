@@ -34,11 +34,13 @@ public record KnowledgeProperties(
    *     service falls back to extractive answers, exactly as it did when Ollama
    *     was not running. It is read from the environment rather than committed:
    *     put it in {@code application-local.yml} or export {@code ANTHROPIC_API_KEY}.
-   * @param model model id, e.g. {@code claude-opus-5}. Lower latency and cost are
-   *     one line away — {@code claude-haiku-4-5} is the fastest current model and
-   *     is a reasonable fit for this task, which is restating retrieved text
-   *     rather than reasoning from scratch. Measure both against the grounding
-   *     cases in {@code docs/AI-SETUP.md} before choosing.
+   * @param model model id. Defaults to {@code claude-sonnet-5}; see
+   *     {@code application.yml} for the measurements behind that. {@code claude-haiku-4-5}
+   *     is cheaper and faster to first token but cannot use {@code effort} or prompt
+   *     caching and is weaker at arithmetic; {@code claude-opus-5} is the escalation.
+   *     Measure any candidate against the grounding cases in {@code docs/AI-SETUP.md}
+   *     before choosing — following the grounding prompt, not model size, is the thing
+   *     that separates a usable model from an unusable one.
    * @param maxAnswerTokens ceiling on a response, covering thinking <i>and</i> the
    *     visible answer. Much larger than the 250 the local model was given: with
    *     adaptive thinking on, most of this budget can be spent before a single
@@ -102,7 +104,7 @@ public record KnowledgeProperties(
    */
   public record Ocr(
       @DefaultValue("true") boolean enabled,
-      @DefaultValue("claude-haiku-4-5") String model,
+      @DefaultValue("claude-sonnet-5") String model,
       @DefaultValue("100") int maxImagesPerDocument,
       @DefaultValue("6144") int minImageBytes,
       @DefaultValue("1500") int maxAnswerTokens) {}

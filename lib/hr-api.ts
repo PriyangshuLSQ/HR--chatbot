@@ -9,12 +9,36 @@
 
 import type { Feedback, Ticket, TicketStatus } from './hr-store';
 
+/**
+ * A failed request, with the status kept.
+ *
+ * The status is the part that matters and it used to be discarded. A 403 here means
+ * "this area is not in your role" — a decision an admin made deliberately — while a
+ * 500 means the store is broken. Collapsing both into a bare message left callers
+ * unable to tell a withheld permission from an outage, and the dashboard reported
+ * one as the other.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+
+  /** Signed in, but this endpoint is not in the session's permissions. */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     // Every failure from this backend carries `{error}`; fall back to the status
     // line for anything that does not (a proxy 502, say).
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Request failed (${res.status})`);
+    throw new ApiError(res.status, body?.error ?? `Request failed (${res.status})`);
   }
   return (await res.json()) as T;
 }
@@ -160,5 +184,50 @@ export async function postTicketComment(id: string, body: string): Promise<Ticke
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ body }),
     })
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Admin metrics
+// ---------------------------------------------------------------------------
+
+export interface MetricsDay {
+  /** ISO date, `YYYY-MM-DD`, in the server's reporting zone. */
+  date: string;
+  /** Short weekday, for the chart's x-axis. */
+  label: string;
+  conversations: number;
+  questions: number;
+}
+
+/**
+ * Aggregate usage for the overview tiles and the volume chart.
+ *
+ * `deltaPct` and `resolvedWithoutHr` are nullable, and the distinction matters:
+ * null means "not computable from the data" — no prior week to compare to, or no
+ * conversations to take a share of — which the UI must render as "—" rather than
+ * as a zero it would otherwise present as a measurement.
+ */
+export interface AdminMetrics {
+  from: string;
+  to: string;
+  days: number;
+  timezone: string;
+  /** Distinct threads with at least one employee question in the window. */
+  conversations: number;
+  /** Employee messages in the window; always >= `conversations`. */
+  questions: number;
+  previousConversations: number;
+  deltaPct: number | null;
+  daily: MetricsDay[];
+  /** Tickets raised in this window — not all time. */
+  escalations: number;
+  openEscalations: number;
+  resolvedWithoutHr: number | null;
+}
+
+export async function fetchAdminMetrics(days = 7): Promise<AdminMetrics> {
+  return json<AdminMetrics>(
+    await fetch(`/api/admin/metrics?days=${days}`, { cache: 'no-store' })
   );
 }

@@ -5,6 +5,8 @@ import com.leadsquared.hr.knowledge.store.FunctionPayPlanRepository;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +67,25 @@ public class FunctionPayPlanService {
   }
 
   /** Stores an edited plan, stamped with who changed it. */
+  /**
+   * Which plan owns each knowledge-base document, for retrieval scoping.
+   *
+   * <p>Derived from the plans rather than configured separately, so there is one place a document
+   * is claimed and it is the same place its slabs live. A document claimed by no plan is absent
+   * from this map, which retrieval treats as neutral — most of the corpus is leave, insurance and
+   * travel policy that belongs to no pay plan and must never be demoted.
+   */
+  public Map<String, String> documentOwners() {
+    Map<String, String> owners = new HashMap<>();
+    for (FunctionPayPlan plan : all()) {
+      if (plan == null || plan.sourceDocumentIds() == null) continue;
+      for (String docId : plan.sourceDocumentIds()) {
+        if (docId != null && !docId.isBlank()) owners.put(docId.trim(), plan.planKey());
+      }
+    }
+    return owners;
+  }
+
   public FunctionPayPlan save(String planKey, FunctionPayPlan edited, String actor) {
     FunctionPayPlan current = plan(planKey);
     if (current == null) throw new IllegalArgumentException("No such plan: " + planKey);
@@ -82,6 +103,12 @@ public class FunctionPayPlanService {
             // Org values pass through as given: clearing one is a legitimate edit meaning "not
             // declared", which is not the same as unchanged.
             edited.orgValues() == null ? current.orgValues() : edited.orgValues(),
+            // Null means "not supplied by this edit" and keeps what is stored. Without this a
+            // save from the console would clear the document mapping every time somebody
+            // adjusted a slab, and the wrong-policy citations would come back silently.
+            edited.sourceDocumentIds() == null
+                ? current.sourceDocumentIds()
+                : edited.sourceDocumentIds(),
             Instant.now().toString(),
             actor);
 

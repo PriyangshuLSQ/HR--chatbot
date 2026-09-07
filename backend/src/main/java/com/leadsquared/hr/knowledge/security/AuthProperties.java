@@ -77,7 +77,12 @@ public record AuthProperties(
    * {@code employee@company.com} while the backend knew no such session.
    */
   public boolean localLoginEnabled(boolean ssoConfigured) {
-    return !ssoConfigured;
+    // Also off whenever the dev stand-in is configured. Both exist for the same situation — no
+    // usable Entra — and offering them together is strictly worse than either alone: the stand-in
+    // signs in as one known address, while this path verifies no password and will therefore issue
+    // a session for any address asked for, HR admins included. With a stand-in present there is a
+    // way in that does not do that, so this one has nothing left to be for.
+    return !ssoConfigured && devSignInEmail() == null;
   }
 
   /**

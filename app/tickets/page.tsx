@@ -92,7 +92,7 @@ function StatusChip({ status, large = false }: { status: TicketStatus; large?: b
 export default function TicketsPage() {
   const router = useRouter();
   const { theme, toggleTheme } = useTheme();
-  const { user, isLoading: authLoading, ssoEnabled } = useChatbotAuth();
+  const { user, isLoading: authLoading } = useChatbotAuth();
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -103,10 +103,13 @@ export default function TicketsPage() {
   /** Which pane a phone is showing. Ignored above 860px, where both are visible. */
   const [view, setView] = useState<'list' | 'thread'>('list');
 
+  // Not gated on ssoEnabled: this page lists the tickets belonging to the session, so with no
+  // session there is nothing here to show and /login is the page that fixes it. The gate used
+  // to skip the check entirely wherever Entra was unconfigured.
   useEffect(() => {
-    if (authLoading || !ssoEnabled) return;
+    if (authLoading) return;
     if (!user) router.replace('/login');
-  }, [authLoading, ssoEnabled, user, router]);
+  }, [authLoading, user, router]);
 
   const load = useCallback(async () => {
     try {
