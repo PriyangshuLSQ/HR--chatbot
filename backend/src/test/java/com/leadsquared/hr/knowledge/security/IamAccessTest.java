@@ -53,6 +53,28 @@ class IamAccessTest {
   private static final IamRole PLAIN_ROLE =
       new IamRole("2", "employee", "Employee", "", Set.of(), true, "2026-01-01T00:00:00Z", "system");
 
+  /**
+   * Shaped like the {@code dev} role somebody actually built: the console plus every area
+   * <em>except</em> the audit trail. It exists to prove an omission is honoured.
+   */
+  private static final IamRole ALL_BUT_AUDIT_ROLE =
+      new IamRole(
+          "3",
+          "dev",
+          "Dev access",
+          "",
+          Set.of(
+              Permissions.ADMIN_CONSOLE,
+              Permissions.ADMIN_ACCESS,
+              Permissions.ADMIN_TICKETS,
+              Permissions.ADMIN_TICKETS_SENSITIVE,
+              Permissions.ADMIN_DIGEST,
+              Permissions.ADMIN_KNOWLEDGE,
+              Permissions.ADMIN_PAYROLL),
+          true,
+          "2026-01-01T00:00:00Z",
+          "admin");
+
   @BeforeEach
   void setUp() {
     roles = Mockito.mock(IamRoleRepository.class);
@@ -354,6 +376,66 @@ class IamAccessTest {
   // -------------------------------------------------------------------------
   // Fixtures
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // A role's omissions have to bite
+  // -------------------------------------------------------------------------
+
+  /**
+   * The bug these two exist for, because it happened.
+   *
+   * <p>A {@code dev} role was created deliberately without {@link Permissions#ADMIN_AUDIT},
+   * assigned to one account, and the audit trail stayed visible. Nothing was wrong with the role
+   * or the assignment — the same address was also in {@code hr.auth.admin-emails}, and
+   * {@link PermissionChecker#has} answers from that list before it ever reads IAM. The list does
+   * not add to a role; it replaces the question.
+   *
+   * <p>So one test per side: the omission is honoured when the list is empty, and the list
+   * overrides the omission when it is not. The second is not a bug, it is the break-glass
+   * working — but it is the behaviour that made a correct role look broken, so it is pinned here
+   * where the next person will find it.
+   */
+  @Test
+  void aRoleWithoutTheAuditPermissionCannotReachTheAuditTrail() {
+    when(users.findByEmailIn(anyCollection()))
+        .thenReturn(
+            List.of(
+                new IamUser(
+                    "u1",
+                    ADMIN_EMAIL,
+                    "Someone",
+                    List.of("dev"),
+                    "2026-01-01T00:00:00Z",
+                    "admin")));
+    when(roles.findAll()).thenReturn(List.of(ADMIN_ROLE, PLAIN_ROLE, ALL_BUT_AUDIT_ROLE));
+
+    PermissionChecker checker = new PermissionChecker(noAdmins(), iam);
+
+    assertThat(checker.has(ADMIN_EMAIL, Permissions.ADMIN_AUDIT)).isFalse();
+    // The rest of the role still works — this is a withheld permission, not a broken account.
+    assertThat(checker.has(ADMIN_EMAIL, Permissions.ADMIN_KNOWLEDGE)).isTrue();
+    assertThat(checker.has(ADMIN_EMAIL, Permissions.ADMIN_TICKETS)).isTrue();
+  }
+
+  @Test
+  void theBreakGlassListOverridesAnOmissionInTheRole() {
+    when(users.findByEmailIn(anyCollection()))
+        .thenReturn(
+            List.of(
+                new IamUser(
+                    "u1",
+                    ADMIN_EMAIL,
+                    "Someone",
+                    List.of("dev"),
+                    "2026-01-01T00:00:00Z",
+                    "admin")));
+    when(roles.findAll()).thenReturn(List.of(ADMIN_ROLE, PLAIN_ROLE, ALL_BUT_AUDIT_ROLE));
+
+    PermissionChecker checker =
+        new PermissionChecker(new AuthProperties(true, false, ADMIN_EMAIL, "/chat"), iam);
+
+    assertThat(checker.has(ADMIN_EMAIL, Permissions.ADMIN_AUDIT)).isTrue();
+  }
 
   private CurrentUser resolver(AuthProperties props) {
     return new CurrentUser(props, iam);

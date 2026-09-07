@@ -53,8 +53,21 @@ public class FunctionPayAdvisor {
               + "|mrr|arr|grr|nrr|utilisation|utilization|pipeline|conversion|churn|slab)\\b",
           Pattern.CASE_INSENSITIVE);
 
+  /**
+   * The US geography, and deliberately not the word "us".
+   *
+   * <p>A bare {@code \\bus\\b} matches the pronoun. "Can you tell us how variable pay works" or
+   * "what does the policy give us" then selected the US plan for an India employee — the wrong
+   * slab table, presented with the same confidence as the right one. Every alternative here is
+   * unambiguously a place, and the bare form is admitted only where a neighbouring word settles
+   * it ("US team", "in the US", "US employee").
+   */
   private static final Pattern US_WORDS =
-      Pattern.compile("\\b(us|u\\.s\\.|usa|united states|america|american)\\b", Pattern.CASE_INSENSITIVE);
+      Pattern.compile(
+          "\\b(u\\.s\\.a?\\.?|usa|united states|america|american)\\b"
+              + "|\\bus\\s+(?:team|employee|employees|plan|policy|sales|role|roles|geo|entity|org)\\b"
+              + "|\\b(?:in|of|for|from|the)\\s+us\\b",
+          Pattern.CASE_INSENSITIVE);
 
   private static final Pattern FUNCTION_HEAD =
       Pattern.compile("\\b(function head|fh|head of|business head)\\b", Pattern.CASE_INSENSITIVE);
@@ -102,7 +115,14 @@ public class FunctionPayAdvisor {
       Pattern.compile(
           "\\b(sample|example|examples|illustrat\\w*|assume|assuming|suppose|hypothetical"
               + "|dummy|any (?:value|values|number|numbers)|some (?:value|values|number|numbers)"
-              + "|walk me through|show me how|demonstrate|for instance)\\b",
+              + "|walk me through|show me how|demonstrate|for instance"
+              // "imagine" was missing, and it is how people actually open a hypothetical.
+              // "Imagine I'm in sales, what would my payout be at 85%" got a request for the
+              // figures it had just been told to invent — the role and the slab were resolved
+              // correctly, and the one thing standing between that and a worked example was
+              // this list not containing the word.
+              + "|imagine|consider|pretending|let'?s say|lets say|say (?:i|i'm|i am)"
+              + "|what if|for argument|ballpark|roughly what)\\b",
           Pattern.CASE_INSENSITIVE);
 
   private final FunctionPayCalculator calculator;
@@ -114,9 +134,23 @@ public class FunctionPayAdvisor {
   }
 
   /** Whether this question is about one of the three revenue-function policies. */
+  /**
+   * Whether this class has anything authoritative to say.
+   *
+   * <p>A function used to be mandatory, and that is what sent "I'm a US employee, how will the
+   * variable pay calculation work" to policy retrieval instead: it names a geography and a
+   * subject, but no function, so this returned false and the plan tables — which are right here,
+   * loaded, and tested against HR's published examples — were never consulted. The answer came
+   * back saying the role tables were unavailable while the calculator held them.
+   *
+   * <p>A named geography is enough on its own now. With no role resolved, {@code contextFor}
+   * returns {@code describePlan}, which is the plan's own slabs and roles — the correct answer to
+   * "how does this work", and better than anything retrieval can assemble from a 131-chunk PDF.
+   */
   public boolean covers(String question) {
     if (question == null) return false;
-    return FUNCTION_WORDS.matcher(question).find() && PAY_WORDS.matcher(question).find();
+    if (!PAY_WORDS.matcher(question).find()) return false;
+    return FUNCTION_WORDS.matcher(question).find() || US_WORDS.matcher(question).find();
   }
 
   /**
@@ -124,7 +158,33 @@ public class FunctionPayAdvisor {
    *
    * @param prior the asker's recent questions, so "and at 150%?" after naming a role still resolves
    */
+  /**
+   * Which plan a question is about, or null when it is not a pay question at all.
+   *
+   * <p>Exposed for retrieval, which uses it to stop one plan's policy being cited for another's
+   * question. Same resolution as {@link #contextFor}, deliberately — two answers to "which plan
+   * is this" would drift, and the one that decided the citations would be the one nobody tested.
+   */
+  public String planKeyFor(String question, List<String> prior) {
+    String all = joined(question, prior);
+    if (!covers(all)) return null;
+    return US_WORDS.matcher(all).find() ? FunctionPayPlanService.US : indiaPlanFor(all);
+  }
+
   public Optional<String> contextFor(String question, List<String> prior) {
+    return contextFor(question, prior, null);
+  }
+
+  /**
+   * @param ownVariableTarget the asker's own annual variable target, or null. Supplied only when
+   *     they asked for their own figure to be used — a pure policy question still reaches this
+   *     class with null, so "how does the US plan work" reads no record, which is the property the
+   *     caller's comment protects.
+   *     <p>A stated figure always wins over it: someone exploring "what if my VP were 2,00,000"
+   *     means the number they typed, not the one on file.
+   */
+  public Optional<String> contextFor(
+      String question, List<String> prior, BigDecimal ownVariableTarget) {
     String all = joined(question, prior);
     if (!covers(all)) return Optional.empty();
 
@@ -138,7 +198,9 @@ public class FunctionPayAdvisor {
     FunctionPayPlan.Role role = plan.role(roleKey);
     if (role == null) return Optional.of(describePlan(plan));
 
-    BigDecimal vp = statedVp(all).orElse(null);
+    // The record is a fallback, never an override.
+    BigDecimal vp = statedVp(all).orElse(ownVariableTarget);
+    boolean vpFromRecord = statedVp(all).isEmpty() && ownVariableTarget != null;
     Map<String, BigDecimal> inputs = statedInputs(all, role);
 
     // Asked for an illustration, supply one rather than asking again for figures the person has
@@ -174,7 +236,7 @@ public class FunctionPayAdvisor {
     return calculator
         .compute(planKey, roleKey, vpUsed, inputsUsed)
         .map(r -> calculator.asFactBlock(r, asExample))
-        .map(block -> block + hypotheticalNote())
+        .map(block -> block + (vpFromRecord ? recordVpNote(vpUsed) : "") + hypotheticalNote())
         .or(() -> Optional.of(describeRole(plan, role, vpUsed, inputsUsed)));
   }
 
@@ -397,6 +459,21 @@ public class FunctionPayAdvisor {
     }
     out.append(hypotheticalNote());
     return out.toString();
+  }
+
+  /**
+   * Says where the variable pay figure came from.
+   *
+   * <p>Named explicitly because the employee cannot otherwise tell, and the two sources mean
+   * different things: a figure they typed is a what-if, a figure from their record is theirs. It
+   * also stops the model claiming the whole payout was computed from their record when only the
+   * VP amount was — the achievement is still whatever they said it was.
+   */
+  private static String recordVpNote(BigDecimal vp) {
+    return "\n\nThe annual variable pay amount above ("
+        + vp.stripTrailingZeros().toPlainString()
+        + ") is the figure on the employee's own record. The achievement percentages are the ones"
+        + " they supplied, not values read from any system.";
   }
 
   private static String hypotheticalNote() {

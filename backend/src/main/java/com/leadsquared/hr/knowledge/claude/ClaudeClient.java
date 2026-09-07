@@ -394,7 +394,12 @@ public class ClaudeClient {
         "generate model={} effort={} first-token={}ms total={}ms in={}tok out={}tok "
             + "cache=read {}/write {} stop={}{}",
         model,
-        effort,
+        // What was actually sent, not what is configured. Printing the parsed value
+        // unconditionally claimed `effort=low` on every Haiku request, where
+        // supportsEffort correctly suppresses the parameter — a log line asserting a
+        // setting that never left the process. The admin console already reported this
+        // honestly as "-"; only the log overstated it.
+        sendEffort ? effort : "n/a (unsupported on this model)",
         firstTokenNanos == 0 ? -1 : (firstTokenNanos - started) / 1_000_000,
         millisSince(started),
         inputTokens,

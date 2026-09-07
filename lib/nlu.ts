@@ -172,6 +172,23 @@ const PHRASE_VOCAB = [
  */
 const DOCUMENT_VOCAB = [
   'lease', 'leased', 'vehicle', 'entitlement', 'residual', 'perquisite', 'gratuity',
+  // 'accrued' is a synonym below, so 'accrual' — a correctly spelled word an employee typing
+  // about leave will reach for — sat two edits from a vocabulary entry and was rewritten into
+  // it. The employee saw "Read as: accrual → accrued" against a question they had spelled
+  // perfectly. Same failure as 'lease' → 'leave' above.
+  'accrual', 'accruals', 'accrue', 'continuity',
+  // 'unpaid' is the one that filed a false grievance. Absent from the vocabulary it sat two
+  // edits from 'unfair', which SYNONYMS maps to 'grievance' — so "how much unpaid leave can I
+  // take" was routed to the HRBP as a confidential critical incident. Its siblings are here for
+  // the same reason.
+  'unpaid', 'lop', 'sabbatical', 'regime',
+  // Ordinary English, not HR jargon, and that is the point: the vocabulary is a few hundred HR
+  // words, so common words outside it are corrected into whichever HR word sits closest.
+  // 'like' -> 'hike' put "what would my salary look like" into Appraisal & increments, and
+  // 'receive' -> 'receipt' is the same shape.
+  'like', 'likely', 'receive', 'received', 'return', 'switch', 'specific', 'hypothetically',
+  // "take my normal variable pay from records" was shown "Read as: normal -> formal".
+  'normal', 'normally', 'records', 'record', 'actual', 'target', 'targets',
 ];
 
 /**
@@ -1148,6 +1165,14 @@ const DISCLOSURE_RE = new RegExp(
 const AUTHORITY_RE =
   /\b(manager|supervisor|boss|reporting|lead|leader|senior|hod|teammate|colleague|coworker|co-worker|team)\b/;
 
+/**
+ * The employee naming a grievance outright.
+ *
+ * Deliberately the literal words and nothing else. Reaching this through the synonym table is
+ * what turned "unpaid leave" into a filed incident — see `hasGrievance`.
+ */
+const GRIEVANCE_WORD_RE = /\b(grievance\w*|complaint\w*|complain\w*)\b/;
+
 /** Conduct worth escalating, beyond the softer MISTREAT list. */
 const ABUSE_RE =
   /\b(threat\w*|bully\w*|bullied|abus\w*|shout\w*|yell\w*|scream\w*|insult\w*|humiliat\w*|retaliat\w*|intimidat\w*|hostile|toxic|verbally)\b/;
@@ -1215,10 +1240,31 @@ function detectSensitive(q: ParsedQuery): { intent: Intent; hard: boolean } | nu
   // matched "where is LeadSquared located". Explicit patterns replace it: the
   // requirement is a person in authority AND mistreatment of them, in one
   // sentence, which ordinary policy questions do not satisfy.
-  const hasGrievance =
-    tokenSet.has('grievance')
-    || tokenSet.has('complaint')
-    || (AUTHORITY_RE.test(text) && (MISTREAT_RE.test(text) || ABUSE_RE.test(text)));
+  // Named explicitly, in the employee's own words or a correction of them — NOT via `tokens`.
+  //
+  // This used to read `tokenSet.has('grievance') || tokenSet.has('complaint')`, and that was the
+  // single worst line in this file. `tokens` are twice-derived: spell-corrected first, then
+  // synonym-mapped. Both are guesses, and they compose. "unpaid" is not in the vocabulary, so it
+  // was corrected to "unfair" at two edits; SYNONYMS maps "unfair" to "grievance"; and this line
+  // then read that as the employee having said the word. "How much unpaid leave can I take" was
+  // filed as a confidential critical grievance with the HRBP.
+  //
+  // Matching the literal words instead — through `either`, so a typo'd "grievence" still counts —
+  // keeps the explicit case and removes the derived one. A synonym can no longer become a filing.
+  const namesGrievance = either(GRIEVANCE_WORD_RE);
+
+  // The mistreatment signal is read from the employee's OWN words, not the corrected text.
+  //
+  // Asymmetric on purpose, and the asymmetry is the lesson above: MISTREAT_RE and ABUSE_RE are
+  // built from ordinary workplace words — "unfair", "different", "denied", "comments" — which is
+  // exactly the set an unrecognised HR term gets corrected into. A missed typo here costs one
+  // question answered as an ordinary question, with the confidential route still offered
+  // elsewhere; a correction inventing one files an incident under someone's name. Harassment
+  // detection above is unchanged and still reads both spellings: those patterns name acts, not
+  // ordinary words, so a correction cannot conjure them.
+  const mistreated = MISTREAT_RE.test(q.raw) || ABUSE_RE.test(q.raw);
+
+  const hasGrievance = namesGrievance || (either(AUTHORITY_RE) && mistreated);
 
   // A report about someone else's dishonesty. Requires the act AND either a subject or the
   // employee saying they are reporting it, so that a question about the fraud policy is still

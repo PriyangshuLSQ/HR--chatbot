@@ -83,8 +83,9 @@ public class ClaudeVisionClient implements ImageTextExtractor {
    *
    * <p>Not a quality decision — the models downsample past this themselves (1568 on
    * claude-haiku-4-5, 2576 on opus and sonnet), so anything larger is bytes spent to be thrown
-   * away at the far end. Set to the largest any current model uses, so switching {@code
-   * knowledge.ocr.model} up to opus for dense scans loses nothing.
+   * away at the far end. Set to the largest any current model uses, which the default
+   * {@code claude-sonnet-5} now actually consumes; under the previous Haiku default three
+   * quarters of the pixels sent here were discarded on arrival.
    */
   private static final int MAX_EDGE_PX = 2576;
 
@@ -156,7 +157,7 @@ public class ClaudeVisionClient implements ImageTextExtractor {
     KnowledgeProperties.Claude claude = props.claude();
     String apiKey = claude == null || claude.apiKey() == null ? "" : claude.apiKey().trim();
 
-    this.model = cfg == null ? "claude-haiku-4-5" : cfg.model();
+    this.model = cfg == null ? "claude-sonnet-5" : cfg.model();
     this.maxAnswerTokens = cfg == null ? 1500 : cfg.maxAnswerTokens();
     // Kept in step with KnowledgeProperties.Ocr's own default. It only applies when no config is
     // bound at all, but a stale number here would silently cap a document at a limit no

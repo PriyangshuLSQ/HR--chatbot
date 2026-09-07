@@ -10,6 +10,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
@@ -30,6 +31,17 @@ import org.springframework.stereotype.Component;
  * real HR data is never overwritten. A Mongo outage at boot logs and moves on: the
  * knowledge base answers questions without this, and failing startup over demo
  * content would be the wrong trade.
+ *
+ * <p><b>OFF by default, and that changed deliberately.</b> "A fresh install should have a
+ * dashboard worth looking at" stopped being worth the cost once the overview tiles became real
+ * measurements. Seeding three escalations and eight ratings into an empty deployment does not
+ * make the dashboard informative — it makes it wrong, and indistinguishably so: SEN-4C2A1 reads
+ * exactly like a real POSH report, and the eight ratings move the satisfaction dial and the
+ * weekly digest. Worse, "only when empty" means it re-seeds after anyone deliberately clears the
+ * collections, so the fake rows come back on the next restart and look like new activity.
+ *
+ * <p>Set {@code knowledge.demo-seed.enabled=true} for a demo or a screenshot. Leave it off
+ * everywhere else, and certainly anywhere HR reads the numbers.
  */
 @Component
 @Order(20)
@@ -39,14 +51,23 @@ public class DemoDataSeed implements ApplicationRunner {
 
   private final TicketRepository tickets;
   private final FeedbackRepository feedback;
+  private final boolean enabled;
 
-  public DemoDataSeed(TicketRepository tickets, FeedbackRepository feedback) {
+  public DemoDataSeed(
+      TicketRepository tickets,
+      FeedbackRepository feedback,
+      @Value("${knowledge.demo-seed.enabled:false}") boolean enabled) {
     this.tickets = tickets;
     this.feedback = feedback;
+    this.enabled = enabled;
   }
 
   @Override
   public void run(ApplicationArguments args) {
+    if (!enabled) {
+      log.debug("Demo seeding is off (knowledge.demo-seed.enabled=false); no rows written.");
+      return;
+    }
     try {
       if (tickets.count() == 0) {
         tickets.saveAll(seedTickets());

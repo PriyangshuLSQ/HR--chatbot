@@ -45,7 +45,7 @@ import type { FAQ } from './chatbot-data';
 // typed against these shapes; nothing serves data from it.
 import type { LeaveBalance, PayslipSummary, TrackedRequest } from './darwinbox';
 import { createTicket, type Ticket } from './hr-store';
-import { RELEVANCE_THRESHOLD, STRONG_RELEVANCE } from './knowledge/types';
+import { RELEVANCE_THRESHOLD } from './knowledge/types';
 import type { AnswerMode, Citation, KnowledgeAnswer } from './knowledge/types';
 
 // ---------------------------------------------------------------------------
@@ -699,9 +699,21 @@ export async function respond(
   // spelling, and spots the two cases above. There are no stored answers behind
   // this: what the corpus supports is what the employee gets.
   //
-  // On an ambiguous query a clarifying question beats a marginal passage, so the
-  // floor is raised there; documents still pre-empt the question on a strong hit.
-  const needed = result.decision === 'clarify' ? STRONG_RELEVANCE : RELEVANCE_THRESHOLD;
+  // One floor for every question, ambiguous or not.
+  //
+  // This used to raise the bar to STRONG_RELEVANCE whenever the matcher was unsure, on the
+  // reasoning that "a clarifying question beats a marginal passage". That reasoning inverted
+  // itself on exactly the questions worth answering well. A question spanning several topics —
+  // "how does a 6-month career break affect my gratuity, leave accrual, PF and insurance" —
+  // is ambiguous *because* it spans them: the matcher splits its score four ways and lands at
+  // 0.47. Raising the floor then made retrieval fail, and the employee got a menu reading
+  // "My leave balance / Leave policy / Health insurance" — a request to throw away three
+  // quarters of their question.
+  //
+  // The model handles this case directly and is instructed to: rule 7 of the grounding prompt
+  // says use every extract that bears on the question and give each subject its own line, and
+  // rule 9 says name plainly what is not covered. It never got the chance.
+  const needed = RELEVANCE_THRESHOLD;
   const grounded = await knowledgeTurn(raw, opts, topicOf(result.intent), result.corrections, needed);
 
   if (grounded) {
@@ -732,20 +744,27 @@ export async function respond(
     return { turn: grounded, ctx: { ...next, offeredEscalation: false } };
   }
 
-  // --- 7. Ambiguous and unsupported: exactly one clarifying question ------
-  if (result.decision === 'clarify' && result.clarify) {
-    return {
-      turn: {
-        content: result.clarify.question,
-        decision: 'clarify',
-        confidence: result.confidence,
-        clarify: result.clarify,
-        collectFeedback: false,
-        corrections: result.corrections,
-      },
-      ctx: { ...next, pendingClarify: result.clarify },
-    };
-  }
+  // --- 7. (removed) the intent-menu clarifying question -------------------
+  //
+  // A turn used to be emitted here offering the matcher's top few intent labels as chips —
+  // "which of these did you mean? My leave balance / Leave policy & entitlement / Health
+  // insurance & benefits". It is gone on purpose.
+  //
+  // It asked the wrong question. Those labels are the matcher's internal topic names, not
+  // anything the employee said, and the menu appeared precisely when their question was rich
+  // enough to touch several of them — so the one thing it reliably did was invite someone to
+  // discard most of what they had asked. A canned list of guesses is also not what "I don't
+  // understand" should sound like coming from an assistant.
+  //
+  // What happens instead: an unsupported question falls through to the handover below, which
+  // says plainly that the documents do not cover it. Where the documents *do* support part of
+  // it, step 6 above already answered — the model is told to cover each part it can and name
+  // what it cannot.
+  //
+  // `understand()` still reports decision 'clarify' and still tags the turn, because ambiguity
+  // is real signal worth having in the weekly digest. It just no longer decides the reply. The
+  // renderer in app/chat/page.tsx and the pendingClarify branch above are now unreachable;
+  // they are the machinery to restore if this is ever wanted back.
 
   // --- 8. Not in the corpus: hand over to a human ------------------------
   //

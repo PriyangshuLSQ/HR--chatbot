@@ -177,6 +177,13 @@ class CrossEmployeeAccessTest {
    *
    * <p>Refusing a first-person question is the worst direction for this guard to fail in, so both
    * sides are pinned: the contraction must pass, and a real name beside a contraction must not.
+   *
+   * <p><b>Capitalised cases are not decoration.</b> Every case here was lower-cased, and the bug
+   * came back through the gap that left: the possessive check runs twice, once on the original
+   * casing and once lower-cased, and only the lower-cased one consulted the exclusion list. So
+   * "what's my payout?" was allowed while <b>"What's my payout?" was refused</b> — the same
+   * question, decided by the shift key — and this test stayed green throughout. A guard that reads
+   * capitalisation has to be tested with capitals.
    */
   @ParameterizedTest
   @ValueSource(
@@ -188,6 +195,17 @@ class CrossEmployeeAccessTest {
         "where's my payslip?",
         "how's my attendance this month?",
         "there's a question I have about my leave",
+        // Sentence-initial capitals: how a person actually types the same questions.
+        "What's my variable pay?",
+        "What's my payout?",
+        "What's my ctc?",
+        "Who's my reporting manager?",
+        "How's my leave balance?",
+        "Where's my payslip?",
+        // The reported case: a self-contained variable-pay question refused outright.
+        "I am a Sales Executive on the New Business team. My annual VP is $100,000. My Net New MRR"
+            + " target for the year is $500,000, and I've achieved $550,000 so far. What's my"
+            + " payout?",
       })
   @DisplayName("A contraction is not a possessive, and must not refuse a first-person question")
   void contractionsAreNotNames(String question) {
@@ -473,5 +491,68 @@ class CrossEmployeeAccessTest {
     assertThat(PersonalDataIntent.wantsComputation("And if I achieve 90%, what will I get?")).isTrue();
     // Level 1 is a plain read, not a computation.
     assertThat(PersonalDataIntent.wantsComputation("What is my variable pay target?")).isFalse();
+  }
+
+  /**
+   * A capitalised policy term is not a colleague.
+   *
+   * <p>The weakest pattern in the guard is "of|for|about" followed by a capitalised word, and it
+   * ran with no exclusion list while the possessive branch next to it had one. So the bug that
+   * {@code apostropheIsNotAColleague} closed was still open one pattern along, and it surfaced on
+   * a question about a published commission table:
+   *
+   * <pre>  "What is the US variable pay slab for Net New MRR?"
+   *   -> "for Net" read as "for &lt;Name&gt;", "pay" is a personal field, and the employee got
+   *      "I can only provide information related to your own employment record."</pre>
+   *
+   * <p>Every case here pairs a capitalised term with a personal-data word, because that pairing is
+   * what the guard requires before it refuses — drop the pay word and these all pass trivially and
+   * the test proves nothing.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "What is the US variable pay slab for Net New MRR?",
+        "What is the payout for Net New MRR at 120% attainment?",
+        "What is the salary component split of Basic and HRA?",
+        "What is the employer contribution of Provident Fund on my basic?",
+        "What does the Provident Fund's employer share come to?",
+        "Is the notice period pay for Probation different?",
+        "What is the leave encashment rule for Earned Leave?",
+        "What is the variable pay plan for Sales?",
+        "How is my CTC treated for Relocation?",
+        "What is the accrual for April, and does unused balance carry over?",
+        "What is the gratuity payout of Section 4 of the Act?",
+        "What is the reimbursement cap for Brokerage under relocation?",
+      })
+  @DisplayName("A capitalised policy term after of/for/about is not a named colleague")
+  void capitalisedPolicyTermsAreNotNames(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be allowed — this names a policy, not a person: %s", question)
+        .isFalse();
+  }
+
+  /**
+   * The other direction, which is the risk this fix carries.
+   *
+   * <p>Loosening the preposition branch must not stop it doing its job. A refusal here is a
+   * clear message rather than a security control — {@link EmployeeDataService} cannot load a
+   * colleague's record either way — but the message is the deliverable, so it has to survive.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "What is the CTC of Priya Sharma?",
+        "What is the salary of Ramesh?",
+        "Tell me about Priya's variable payout.",
+        "What is the leave balance for Ananya Iyer?",
+        "Can you tell me about Rajesh Kumar's appraisal rating?",
+        "What is the grade of Meera in the Sales team?",
+      })
+  @DisplayName("A real name after of/for/about is still declined")
+  void namedColleaguesAreStillDeclined(String question) {
+    assertThat(CrossEmployeeGuard.mustDecline(question))
+        .as("Should be declined — this names a person: %s", question)
+        .isTrue();
   }
 }

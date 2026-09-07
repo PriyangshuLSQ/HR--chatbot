@@ -199,10 +199,21 @@ export function ChatbotAuthProvider({ children }: { children: React.ReactNode })
       // untouched, so signing back in is one click and does not re-prompt for a
       // password — which is the expected behaviour for a corporate SSO app, not a
       // bug. A full sign-out would need a redirect to Entra's logout endpoint.
+      // Not a bare `catch {}`. This swallowed a 404 for as long as the endpoint did not exist
+      // on non-Entra deployments: the button cleared local state, navigated to /login, and the
+      // still-valid cookie sent the employee straight back in. A sign-out that fails has to say
+      // so — the local state is already cleared either way, so the redirect still happens, but
+      // the session may have survived and that is worth knowing about.
       try {
-        await fetch('/api/auth/logout', { method: 'POST' });
-      } catch {
-        // Best effort — the local state is already cleared.
+        const res = await fetch('/api/auth/logout', { method: 'POST' });
+        if (!res.ok) {
+          console.error(
+            `Sign-out failed: /api/auth/logout returned ${res.status}. The server session may` +
+              ' still be active.'
+          );
+        }
+      } catch (err) {
+        console.error('Sign-out request did not reach the server.', err);
       }
     }
   };

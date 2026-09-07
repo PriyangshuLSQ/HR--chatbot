@@ -59,7 +59,7 @@ with verbatim quoted passages.
 - **Frontend**: Next.js 16 with React 19
 - **Backend**: Spring Boot 3.5 (Java 21) in `backend/`, proxied at `/api/*`
 - **Styling**: Custom CSS with Tailwind utilities (no UI libraries)
-- **AI**: the Claude API (`claude-haiku-4-5`) writes answers; Ollama
+- **AI**: the Claude API (`claude-sonnet-5`) writes answers; Ollama
   (`nomic-embed-text`) is the embedder only — no ML dependency in `package.json`.
   The answer is written by the model in its own
   words from the retrieved passages, never copied out of them; see
@@ -131,11 +131,19 @@ spring:
         provider:
           azure-ad:
             issuer-uri: https://login.microsoftonline.com/<tenant-id>/v2.0
-            user-name-attribute: preferred_username
 hr:
   auth:
     admin-emails: someone@yourcompany.com
 ```
+
+Do **not** set `user-name-attribute` here. `application.yml` already sets it to
+`sub`, and that is load-bearing: Spring validates this attribute against the
+*userinfo* response, and Entra's userinfo returns only `sub` / `name` /
+`given_name` / `family_name`. Asking for `preferred_username` — which lives in the
+ID token, a different payload — fails the whole sign-in with "Attribute value for
+'preferred_username' cannot be null" *after* a successful code exchange, which
+looks like a broken app rather than a config typo. The UPN is still what the app
+keys on; `EntraOidcUserService` reads it off the merged ID-token claims.
 
 In the Entra app registration, `http://localhost:3000/api/auth/callback/azure-ad`
 must be listed as a redirect URI **under the "Web" platform** — not "Single-page
@@ -189,16 +197,14 @@ With Entra configured (the normal case), there is one way in: **Sign in with
 Microsoft**, using your work account. Whether you land on `/chat` or `/admin`
 follows your account, not a choice on the login page.
 
-The demo credentials below only work when no `client-id` is configured — the login
-page hides the email form entirely under SSO, because a form the backend will
-reject reads as a broken app rather than a locked one.
+The email/password path exists only for a checkout with no `client-id` and no dev
+stand-in configured. It verifies no password — it will issue a session for any address
+asked for — so it is off whenever either of the other two is available, and the login
+page hides the form rather than offering a way in the backend will refuse.
 
-<details>
-<summary>Demo credentials (no-SSO mode only)</summary>
-
-**Employee:** `employee@company.com` / `demo` — or the "Employee" quick login
-**HR Admin:** `hr@company.com` / `demo` — or the "HR Admin" quick login
-</details>
+There are no demo accounts. The quick-login buttons for `employee@company.com` and
+`hr@company.com` were removed: they signed the visitor in as people who do not work
+here, and the chat window then filled in a name to match.
 
 ## Key Files
 

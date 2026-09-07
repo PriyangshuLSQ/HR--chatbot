@@ -96,6 +96,16 @@ public record Employee(
    * @param lastPayoutAmount what was actually paid last cycle, for "what was my variable
    *     payout in the last appraisal cycle"
    */
+  /**
+   * @param totalTargetCtc fixed plus variable at 100% achievement
+   * @param basicMonthly the salary-structure components below all come from the extract's
+   *     "Monthly Breakdown" block, and none of them used to be imported. The columns were in
+   *     Compensation_Records.xlsx the whole time; the record simply had nowhere to put them, so
+   *     "what is my HRA" reached policy retrieval, found no policy describing a CTC structure,
+   *     and was answered "I can't state that figure" about a number sitting in the extract.
+   * @param employeePfDeduction employee-side deductions — what separates gross from in-hand, and
+   *     the first thing someone checks a payslip against
+   */
   public record Compensation(
       BigDecimal fixedCtc,
       BigDecimal variableTargetAmount,
@@ -104,7 +114,18 @@ public record Employee(
       BigDecimal monthlyInHand,
       BigDecimal lastPayoutAmount,
       String lastPayoutCycle,
-      String currency) {}
+      String currency,
+      // Appended rather than interleaved: the order is the constructor's contract, and every
+      // existing call site passes these eight positionally.
+      BigDecimal totalTargetCtc,
+      BigDecimal monthlyCtc,
+      BigDecimal basicMonthly,
+      BigDecimal hraMonthly,
+      BigDecimal specialAllowanceMonthly,
+      BigDecimal employerPfMonthly,
+      BigDecimal gratuityProvisionMonthly,
+      BigDecimal employeePfDeduction,
+      BigDecimal professionalTax) {}
 
   /** @param asOf leave balances are the fastest-moving field in the extract. */
   public record LeaveBalances(

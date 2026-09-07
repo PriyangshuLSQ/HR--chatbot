@@ -3,6 +3,7 @@ package com.leadsquared.hr.knowledge.store;
 import com.leadsquared.hr.knowledge.model.ChatThread;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.mongodb.repository.MongoRepository;
 
 /**
@@ -14,6 +15,16 @@ import org.springframework.data.mongodb.repository.MongoRepository;
 public interface ThreadRepository extends MongoRepository<ChatThread, String> {
 
   List<ChatThread> findByOwnerOrderByUpdatedAtDesc(String owner);
+
+  /**
+   * The newest page of one owner's threads, for the chat sidebar.
+   *
+   * <p>Exists because the server now retains history the client has aged out — see
+   * {@code ThreadController.sync}, which no longer deletes. Without a limit here the sidebar would
+   * grow without bound and every chat load would ship an employee's entire history to render a
+   * list they only ever scroll the top of.
+   */
+  List<ChatThread> findByOwnerOrderByUpdatedAtDesc(String owner, Pageable pageable);
 
   /**
    * One thread, and only if this owner has it.

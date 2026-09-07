@@ -1,0 +1,96 @@
+# Production overlay for a single EC2 host. Use WITH the base file, never instead of it:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What it changes, and why each one matters:
+#
+#   - Caddy terminates TLS and is the only thing listening on the public internet. The app
+#     ports stop being published at all, so :3000 and :8080 are unreachable from outside
+#     the host even if a security group rule is wrong.
+#   - MongoDB comes from Atlas rather than a container. It is already managed, already
+#     backed up, and already holds this deployment's tickets and threads.
+#   - Sign-in is switched from "boots open with a warning" to "refuses to start if
+#     misconfigured", which is the only form of that check that survives a hurried deploy.
+#
+# Everything secret stays in .env on the instance. Nothing here contains a credential.
+
+services:
+  # ---------------------------------------------------------------------------
+  # TLS terminator and the only public listener.
+  #
+  # Caddy rather than nginx purely for the certificate: it obtains and renews Let's
+  # Encrypt automatically from the hostname in the Caddyfile, which removes the step
+  # most likely to be skipped and then to expire silently 90 days later.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Atlas, not a container.
+  #
+  # `!reset []` clears the base file's depends_on: with no mongo service here, an
+  # inherited dependency on it would stop the stack starting at all.
+  # ---------------------------------------------------------------------------
+  mongo:
+    profiles: ["local-only"]
+
+  backend:
+    # Reachable only through the frontend proxy on the compose network.
+    ports: !reset []
+    depends_on: !reset
+      qdrant:
+        condition: service_started
+      ollama-pull:
+        condition: service_started
+    environment:
+      # Atlas. Required — there is no mongo container in this overlay, so an unset value
+      # leaves the service pointing at a loopback address nothing is listening on.
+      MONGODB_URI: ${MONGODB_URI:?set MONGODB_URI to the Atlas connection string in .env}
+
+      # The public origin. This is what Entra redirects back to, and it must match a
+      # registered Web redirect URI exactly, as <APP_BASE_URL>/api/auth/callback/azure-ad.
+      APP_BASE_URL: ${APP_BASE_URL:?set APP_BASE_URL to https://your-host in .env}
+
+      # Refuse to start rather than serve compensation, leave and performance data with no
+      # authentication. Non-negotiable on a public host.
+      AUTH_REQUIRED: "true"
+
+      # Empty, deliberately. The base file excludes the OAuth2 client autoconfiguration so
+      # the stack can come up with no Entra credentials for local demos; clearing it here
+      # is what turns real sign-in back on. Supplying credentials without this does
+      # nothing — see .env.example.
+      SPRING_AUTOCONFIGURE_EXCLUDE: ""
+
+      # There is a certificate in front now, so the session cookie must be Secure.
+      COOKIE_SECURE: "true"
+
+    # JAVA_TOOL_OPTIONS in the image sets -XX:MaxRAMPercentage=75, and "RAM" to a container
+    # with no limit means the whole host. On a laptop that is harmless; on a shared EC2 box
+    # running Ollama, Qdrant and Next beside it, the JVM sizes its heap against memory the
+    # others are also going to want, and the first OOM kill lands on whichever asks second.
+    # A limit here makes the 75% mean 75% of this number.
+    mem_limit: 2g
+
+  ollama:
+    # The embedding model is small — ~0.3 GB resident once warm — but the runtime around it
+    # is not, and it is the service that grows if anyone pulls a second model.
+    mem_limit: 2g
+
+  frontend:
+    # Caddy reaches it over the compose network; the host does not publish it.
+    ports: !reset []
+
+volumes:
+  caddy-data:
+  caddy-config:

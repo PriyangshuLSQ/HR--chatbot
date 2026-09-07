@@ -170,4 +170,39 @@ class CurrentUserTest {
     assertThat(NO_ADMINS.shouldSecure(true)).isTrue();
     assertThat(new AuthProperties(false, false, "", "/chat").shouldSecure(true)).isFalse();
   }
+
+  /**
+   * The password path and the dev stand-in must not both be on offer.
+   *
+   * <p>{@code localLoginEnabled} verifies no password — it issues a session for whatever address
+   * is asked for, HR admin included. That was tolerable as the only way into a credential-less
+   * checkout. It stopped being tolerable once the dev stand-in existed for the same situation and
+   * signs in as exactly one configured address, because the two were then offered side by side on
+   * a deployment reachable over the network.
+   *
+   * <p>The user-visible symptom was the other end of the same thing: a login page offering "use
+   * the demo employee account", which created a real session for {@code employee@company.com} and
+   * a chat window that greeted them by an invented name.
+   */
+  @Test
+  void theDevStandInSupersedesThePasswordPath() {
+    AuthProperties open = new AuthProperties(true, false, "", "/chat");
+    // Nothing configured: the password path is the only way in, so it stays.
+    assertThat(open.localLoginEnabled(false)).isTrue();
+    // Entra configured: off, as it always was.
+    assertThat(open.localLoginEnabled(true)).isFalse();
+
+    AuthProperties standIn =
+        new AuthProperties(
+            true, false, "", "/chat", "nalamati.shirin@leadsquared.com", "Nalamati Bhargav Shirin");
+    // A stand-in is configured, so there is a way in that does not mint arbitrary identities.
+    assertThat(standIn.localLoginEnabled(false)).isFalse();
+    assertThat(standIn.localLoginEnabled(true)).isFalse();
+    // And the stand-in itself is unaffected.
+    assertThat(standIn.devSignInEmail()).isEqualTo("nalamati.shirin@leadsquared.com");
+
+    // Blank is not configured — a set-but-empty env var must not disable the only login path.
+    AuthProperties blank = new AuthProperties(true, false, "", "/chat", "  ", "");
+    assertThat(blank.localLoginEnabled(false)).isTrue();
+  }
 }

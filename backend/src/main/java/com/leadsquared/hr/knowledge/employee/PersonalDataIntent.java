@@ -81,7 +81,14 @@ public final class PersonalDataIntent {
   private static final Pattern COMPENSATION_WORDS =
       Pattern.compile(
           "\\b(ctc|salary|compensation|package|fixed pay|gross|monthly|take home|in.?hand"
-              + "|breakdown|earnings)\\b",
+              + "|breakdown|earnings"
+              // The salary structure. Without these "what is my HRA" matched no personal field,
+              // so no EMPLOYEE RECORD block was built and the question went to policy retrieval —
+              // which has no policy stating one person's HRA, and correctly said so. The figures
+              // were in the extract; nothing asked for them.
+              + "|hra|house rent|basic|special allowance|allowance|provident fund|\\bpf\\b"
+              + "|professional tax|\\bptax\\b|gratuity|deduction|deductions|structure"
+              + "|components?)\\b",
           Pattern.CASE_INSENSITIVE);
 
   private static final Pattern VARIABLE_WORDS =

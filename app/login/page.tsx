@@ -9,7 +9,6 @@ import {
   CheckIcon,
   LaptopIcon,
   ShieldIcon,
-  SparkIcon,
   TeamsIcon,
   WalletIcon,
 } from '@/components/Icons';
@@ -118,10 +117,13 @@ export default function LoginPage() {
       return;
     }
 
-    // No Entra credentials configured — the server is open, so this is the demo
-    // identity rather than a pretend token.
-    const mail = mode === 'admin' ? 'hr@company.com' : 'employee@company.com';
-    setTimeout(() => void go(mail, 'demo'), 400);
+    // No Entra credentials and no stand-in: there is nothing for this button to do, and it
+    // used to quietly sign the visitor in as employee@company.com — a person who does not
+    // work here — which is how a fabricated identity reached the chat window. Say so instead.
+    setError(
+      'Microsoft sign-in is not configured on this deployment. Ask HR Tech to enable it.'
+    );
+    setBusy(null);
   };
 
   const passwordSignIn = (e: React.FormEvent) => {
@@ -135,21 +137,13 @@ export default function LoginPage() {
     void go(email, password);
   };
 
-  const demoSignIn = () => {
-    const mail = mode === 'admin' ? 'hr@company.com' : 'employee@company.com';
-    setEmail(mail);
-    setPassword('demo');
-    setError('');
-    setBusy('password');
-    void go(mail, 'demo');
-  };
 
   return (
     <main style={{ minHeight: '100vh', background: 'var(--background)' }}>
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(330px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(330px, 100%), 1fr))',
           maxWidth: 1080,
           margin: '0 auto',
           alignItems: 'center',
@@ -373,7 +367,7 @@ export default function LoginPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder={mode === 'admin' ? 'hr@company.com' : 'you@company.com'}
+                placeholder="you@leadsquared.com"
                 autoComplete="username"
               />
             </label>
@@ -410,15 +404,6 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ width: '100%', marginTop: '0.75rem' }}
-            onClick={demoSignIn}
-            disabled={busy !== null}
-          >
-            <SparkIcon size={14} />
-            Use the demo {mode === 'admin' ? 'admin' : 'employee'} account
-          </button>
           </>
           )}
 
@@ -434,7 +419,7 @@ export default function LoginPage() {
             {[
               ssoEnabled
                 ? 'Authentication is handled by Microsoft — no password reaches this app'
-                : 'No credentials leave your device in this demo',
+                : 'Sign-in on this deployment is configured by HR Tech',
               'Feedback is collected anonymously',
             ].map((line) => (
               <p

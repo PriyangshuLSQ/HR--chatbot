@@ -1,0 +1,44 @@
+# Replace robin.example.com with the hostname the certificate is for, and set the same
+# value as APP_BASE_URL in .env (with https://). Caddy obtains and renews the certificate
+# from this line; the email is where Let's Encrypt sends expiry warnings.
+#
+# For a first test without a domain, use `:80` instead of the hostname — Caddy then serves
+# plain http, and you must leave COOKIE_SECURE unset, because a Secure cookie is not sent
+# over http and sign-in presents as a login loop rather than an error.
+
+{
+	email hr-tech@leadsquared.com
+}
+
+robin.example.com {
+	encode zstd gzip
+
+	# Everything goes to the Next.js server, which holds the /api and /oauth2 rewrites that
+	# put the browser and the Java service on one origin. Proxying to the backend directly
+	# here would split the origin and break the session cookie.
+	reverse_proxy frontend:3000
+
+	# The backend honours X-Forwarded-* (forward-headers-strategy: framework), which is what
+	# makes the Entra redirect resolve to this public host rather than to :8080 inside the
+	# container. Caddy sets these by default; named here so nobody removes them.
+	header_up X-Forwarded-Proto {scheme}
+	header_up X-Forwarded-Host {host}
+
+	# A policy upload can be 180 MB of scanned PDF and OCR can take minutes — both limits
+	# are matched in next.config.mjs and the Spring multipart config, so a mismatch here
+	# would make this the real cap while the app kept explaining a different one.
+	request_body {
+		max_size 180MB
+	}
+	transport http {
+		read_timeout 300s
+		write_timeout 300s
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}

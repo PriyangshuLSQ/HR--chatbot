@@ -96,30 +96,51 @@ flip to *Full AI · generating answers*.
 
 ### Choosing a model
 
-`claude-haiku-4-5` is the default: fastest current model, $1/$5 per MTok against
-Opus 5's $5/$25, and this task is well within it. Most of the speed is not the model
-being small — it is that Haiku 4.5 does not think by default, so there is no
-pre-answer thinking phase. On Opus 5 that phase was ~4.6s of the ~8s an answer took.
+`claude-sonnet-5` is the default, changed from `claude-haiku-4-5` on 23 Aug 2026.
 
-`claude-opus-5` is the switch back if a wrong HR answer starts costing an employee
-real money or leave. Run the grounding cases below before trusting either model; the
-two hard ones are what a smaller model fails first.
+Haiku was the right answer while the task was "restate five retrieved passages or
+decline". It stopped being the whole task once the grounding prompt was allowed to
+project an employee's own hypothetical — "if my CTC rises 15%, what is 20% of it" —
+because that asks for a rupee figure somebody will plan around.
 
-Two knobs behave differently on Haiku 4.5, and neither errors:
+Measured on the same prompt and corpus, six runs each:
 
-- **`effort` does not exist on it** and would return a 400, so it is not sent. The
-  admin console shows the effort as `—`. It applies again on Opus 5.
-- **The minimum cacheable prefix is 4096 tokens**, against 512 on Opus 5. This system
-  prompt is ~1.2k, so prompt caching silently stops applying — `cache=read 0` in the
-  generate log is expected here, not a regression. Haiku is cheaper per token anyway.
+| | Haiku 4.5 | Sonnet 5 |
+|---|---|---|
+| Arithmetic on a supplied hypothetical | **4/6 correct** | **6/6 correct** |
+| The two grounding cases below | held | held, worded better |
+| Time to first token | 0.8–1.2s | 1.4–1.7s |
+| Total generation | 3.5–3.8s | 2.7–4.4s |
+| Prompt cache | `cache=read 0` | `cache=read 3021` |
+| `effort` | rejected, not sent | accepted and live |
+
+Haiku's misses were `806,000 × 1.15 = 927,900` — wrong by 1,000, compounded into the
+target figure, and indistinguishable from a correct answer on the page. That is the
+failure the no-calculation rule exists to prevent, so a model that avoids it is worth
+half a second of first-token latency.
+
+**Cost is not the 3x the price list implies** ($3/$15 per MTok against $1/$5; $2/$10
+under intro pricing until 31 Aug 2026). Prompt caching applies on Sonnet 5 and does not
+on Haiku, which needs a 4096-token cacheable prefix this system prompt does not reach.
+Cached input bills at roughly a tenth, so a typical answer runs about $0.0062 against
+$0.0048 — call it 1.3x. Output tokens are the only true 3x, and there are only ~200.
+
+`claude-opus-5` is the escalation if a wrong HR answer starts costing an employee real
+money or leave. Run the grounding cases below before trusting any model; following the
+grounding prompt, not model size, is what separates a usable one from an unusable one.
+
+**None of this makes the model a calculator.** Sonnet 5 is measurably better at
+arithmetic, not reliable at it — six correct runs is a small sample on one sum. A figure
+an employee plans around belongs in `VariablePayCalculator`, where it is computed in
+Java and tested against HR's published worked examples.
 
 Tuning knobs, all environment-overridable:
 
 ```bash
-CLAUDE_MODEL=claude-opus-5            # default claude-haiku-4-5
-KNOWLEDGE_CLAUDE_EFFORT=low           # low | medium | high | xhigh | max; ignored on Haiku 4.5
+CLAUDE_MODEL=claude-opus-5            # default claude-sonnet-5
+KNOWLEDGE_CLAUDE_EFFORT=low           # low | medium | high | xhigh | max; ignored on Haiku 4.5 / Sonnet 4.5
 CLAUDE_MAX_ANSWER_TOKENS=2000         # thinking AND visible answer, together
-CLAUDE_CACHE_SYSTEM_PROMPT=true       # inert on Haiku 4.5 (see above)
+CLAUDE_CACHE_SYSTEM_PROMPT=true       # live on Sonnet 5; inert on Haiku 4.5 (see above)
 ```
 
 `KNOWLEDGE_CLAUDE_EFFORT` is deliberately not named `CLAUDE_EFFORT`: Claude Code

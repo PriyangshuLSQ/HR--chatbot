@@ -16,9 +16,13 @@ import {
   type AiStatus,
   type KnowledgeSnapshot,
   type UploadOutcome,
+  fetchEmployeeDataStatus,
+  importEmployeeExtract,
+  type EmployeeDataStatus,
+  type EmployeeImportReport,
 } from '@/lib/knowledge/api';
 import type { KnowledgeDoc } from '@/lib/knowledge/types';
-import { postTicketComment } from '@/lib/hr-api';
+import { fetchAdminMetrics, postTicketComment, type AdminMetrics } from '@/lib/hr-api';
 import {
   ROUTE_LABELS,
   buildWeeklyDigest,
@@ -81,9 +85,12 @@ import RichText from '@/components/RichText';
 import {
   AlertIcon,
   BotIcon,
+  ChatIcon,
   CheckCircleIcon,
   ClockIcon,
   FileIcon,
+  LogoutIcon,
+  MenuIcon,
   MoonIcon,
   PlusIcon,
   RefreshIcon,
@@ -92,6 +99,7 @@ import {
   SunIcon,
   TicketIcon,
   TrashIcon,
+  XIcon,
   UploadIcon,
 } from '@/components/Icons';
 
@@ -142,20 +150,19 @@ const SHELL_MAX = 1560;
 /** Gutter that grows with the viewport, so wide screens are not edge-to-edge. */
 const SHELL_PAD = 'clamp(1rem, 2.5vw, 2.25rem)';
 
-/** Deterministic weekday volume fixture — swap for real telemetry. */
-const VOLUME = [
-  { label: 'Mon', value: 412 },
-  { label: 'Tue', value: 468 },
-  { label: 'Wed', value: 501 },
-  { label: 'Thu', value: 447 },
-  { label: 'Fri', value: 523 },
-  { label: 'Sat', value: 138 },
-  { label: 'Sun', value: 96 },
-];
+/*
+ * The weekday volume fixture that used to live here is gone. It summed to 2,585
+ * conversations a week on a deployment whose real figure is around twenty, and the
+ * "resolved without HR" tile divided the real ticket count by it — so a decorative
+ * number was the denominator of a percentage HR was invited to read as a result.
+ *
+ * Volume now comes from GET /api/admin/metrics, which counts employee messages in
+ * the `threads` collection. See ConversationMetricsService.
+ */
 
 export default function AdminPage() {
   const router = useRouter();
-  const { user, isLoading: authLoading, ssoEnabled, permissions } = useChatbotAuth();
+  const { user, isLoading: authLoading, ssoEnabled, permissions, logout } = useChatbotAuth();
 
   // Tabs this session is allowed to see. A tab with no `requires` is open to any admin.
   const visibleTabs = TABS.filter((t) => !t.requires || permissions.includes(t.requires));
@@ -168,10 +175,15 @@ export default function AdminPage() {
   // Signed out is a redirect, because there is a page that fixes it. Signed in
   // without access is not: bouncing someone to /chat reads as a broken link, and
   // they would keep clicking it. Say it plainly instead.
+  //
+  // The `!ssoEnabled` bail-out is gone: it meant that wherever Entra was not configured, an
+  // unsigned visitor got the console instead of the login page. The role check below stays
+  // gated on ssoEnabled, because without a configured identity provider there is no role to
+  // check against — but "no session at all" is answerable in every posture.
   useEffect(() => {
-    if (authLoading || !ssoEnabled) return;
+    if (authLoading) return;
     if (!user) router.replace('/login');
-  }, [authLoading, ssoEnabled, user, router]);
+  }, [authLoading, user, router]);
 
   const accessDenied = !authLoading && ssoEnabled && !!user && user.role !== 'hr_admin';
 
@@ -183,6 +195,8 @@ export default function AdminPage() {
   const [version, setVersion] = useState(0);
   /** Set when the ticket store could not be reached — shown as a banner. */
   const [storeError, setStoreError] = useState<string | null>(null);
+  /** Mobile only — the tab strip becomes a drawer under 861px. See globals.css. */
+  const [navOpen, setNavOpen] = useState(false);
 
   // The uploaded knowledge base and the local AI engine both live server-side.
   const [kb, setKb] = useState<KnowledgeSnapshot | null>(null);
@@ -208,6 +222,46 @@ export default function AdminPage() {
     void refreshKnowledge();
   }, [refreshKnowledge]);
 
+  /*
+   * Drawer behaviour: Escape closes it, and the page behind it does not scroll.
+   *
+   * Both are what makes an overlay feel like a drawer rather than a floating panel —
+   * without the scroll lock a swipe on the scrim scrolls the dashboard underneath,
+   * which reads as the drawer being stuck to a moving page. Restores the previous
+   * overflow rather than clearing it, so this cannot fight another lock.
+   */
+  useEffect(() => {
+    if (!navOpen) return;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNavOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [navOpen]);
+
+  /*
+   * A drawer left open across a resize would sit over the desktop layout with no
+   * hamburger to close it — the button is `only-mobile`. Closing on the same 860px
+   * boundary the CSS uses keeps the two from disagreeing.
+   */
+  useEffect(() => {
+    if (!navOpen) return;
+    const wide = window.matchMedia('(min-width: 861px)');
+    const onChange = () => {
+      if (wide.matches) setNavOpen(false);
+    };
+    wide.addEventListener('change', onChange);
+    return () => wide.removeEventListener('change', onChange);
+  }, [navOpen]);
+
   // Chat and this dashboard share one store, so re-read on any change.
   useEffect(() => {
     const load = () => {
@@ -217,12 +271,26 @@ export default function AdminPage() {
 
     const unsubscribe = subscribe(load);
 
-    // Tickets and feedback come from MongoDB via the backend. An admin looking at
-    // three empty panels must be able to tell "a quiet week" from "the store is
-    // down", so the failure is shown rather than logged.
-    void hydrate()
-      .catch((err: unknown) => {
-        setStoreError(err instanceof Error ? err.message : 'Could not load tickets.');
+    /*
+     * Tickets and feedback come from MongoDB via the backend. An admin looking at
+     * three empty panels must be able to tell "a quiet week" from "the store is
+     * down", so a real failure is shown rather than logged.
+     *
+     * What is NOT shown is a withheld permission. `/api/tickets` needs admin.tickets
+     * and `/api/feedback` needs admin.digest, so a role without one of them gets a 403
+     * that is the correct answer, not a fault. Two things follow: only ask for what
+     * this session may have, and never turn the other resource's 403 into a banner —
+     * that is how removing the digest permission came to report the ticket store as
+     * unavailable on every HR page.
+     */
+    void hydrate({
+      tickets: permissions.includes(ADMIN_TICKETS),
+      feedback: permissions.includes(ADMIN_DIGEST),
+    })
+      .then((result) => {
+        // Only genuine failures. 'forbidden' is a decision someone made in the console.
+        const broken = [result.ticketError, result.feedbackError].filter(Boolean);
+        setStoreError(broken.length ? broken.join(' ') : null);
       })
       .finally(() => {
         load();
@@ -230,15 +298,47 @@ export default function AdminPage() {
       });
 
     return unsubscribe;
-  }, []);
+    // Re-runs when permissions arrive: they are empty on the first render, before
+    // /api/auth/me has answered, and hydrating on that would ask for nothing.
+  }, [permissions]);
 
   const digest = useMemo(() => (booted ? buildWeeklyDigest(7) : null), [booted, version]);
   const feedbackCount = useMemo(() => (booted ? getFeedback().length : 0), [booted, version]);
+
+  /*
+   * Conversation volume, from the server. Null while in flight and on failure —
+   * the tiles render "—" rather than a zero, because a zero here would read as
+   * "nobody used the assistant this week" when the truth is "we could not ask".
+   *
+   * Server-side because it aggregates across every employee's threads, which no
+   * browser is allowed to enumerate; the endpoint returns counts only.
+   */
+  const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    fetchAdminMetrics(7)
+      .then((m) => {
+        if (live) setMetrics(m);
+      })
+      .catch((err: unknown) => {
+        if (live) setMetricsError(err instanceof Error ? err.message : 'Could not load metrics.');
+      });
+    return () => {
+      live = false;
+    };
+  }, [version]);
 
   const openTickets = tickets.filter((t) => t.status !== 'resolved');
   const criticalOpen = openTickets.filter((t) => t.priority === 'critical');
 
   // After every hook, so the early return cannot change the hook order.
+  //
+  // Nothing renders without a session: the effect above is on its way to /login, and the
+  // console is exactly the page that must not appear for an instant first.
+  if (authLoading || !user) return null;
+
   if (accessDenied) return <AccessDenied email={user?.email ?? null} />;
 
   return (
@@ -263,10 +363,35 @@ export default function AdminPage() {
             flexWrap: 'wrap',
           }}
         >
+          <button
+            className="btn btn-ghost only-mobile"
+            style={{ padding: '0.4375rem', marginLeft: '-0.25rem' }}
+            onClick={() => setNavOpen(true)}
+            aria-label="Open menu"
+            aria-expanded={navOpen}
+            aria-controls="admin-nav"
+          >
+            <MenuIcon size={18} />
+          </button>
+
           <RobinAvatar size={34} rounded="badge" ring />
           <div style={{ minWidth: 0 }}>
-            <h1 style={{ fontSize: '1rem', fontWeight: 700, lineHeight: 1.25 }}>Robin · HR Admin Console</h1>
-            <p style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+            <h1
+              style={{
+                fontSize: '1rem',
+                fontWeight: 700,
+                lineHeight: 1.25,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Robin · HR Admin Console
+            </h1>
+            <p
+              className="hide-mobile"
+              style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}
+            >
               LeadSquared People Team
             </p>
           </div>
@@ -279,45 +404,125 @@ export default function AdminPage() {
               </span>
             )}
             <button
-              className="btn btn-ghost"
+              className="btn btn-ghost hide-mobile"
               style={{ padding: '0.4375rem' }}
               onClick={toggleTheme}
               aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             >
               {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
             </button>
-            <a href="/chat" className="btn btn-secondary btn-sm">
-              Open chat
+            {/* Icon-only, to sit as a peer of the theme and sign-out buttons rather than a
+                text button wedged between them. The label survives for anyone not reading
+                shapes — the drawer keeps the full wording, where there is room for it. */}
+            <a
+              href="/chat"
+              className="btn btn-ghost hide-mobile"
+              style={{ padding: '0.4375rem' }}
+              aria-label="Open chat"
+              title="Open chat"
+            >
+              <ChatIcon size={16} />
             </a>
+            {/*
+              Who this is. An admin console that can revoke someone's access should say
+              whose session is doing it — and it is the label the sign-out button needs
+              to be unambiguous. Hidden on a phone, where the header has no room for an
+              address; the button keeps its own aria-label there.
+            */}
+            {user?.email && (
+              <span
+                className="hide-mobile"
+                title={user.email}
+                style={{
+                  fontSize: '0.75rem',
+                  color: 'var(--muted-foreground)',
+                  maxWidth: '13rem',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {user.email}
+              </span>
+            )}
+            <button
+              className="btn btn-ghost"
+              // error-ink rather than the raw error token: it stays legible on both
+              // themes' surfaces, and the icon inherits it through currentColor. Same
+              // treatment as the chat sidebar's sign-out.
+              style={{ padding: '0.4375rem', color: 'var(--error-ink)' }}
+              aria-label="Sign out"
+              title="Sign out"
+              onClick={() => {
+                // A full redirect, not a router push: the session cookie is gone, so
+                // every cached page behind this one is stale.
+                void logout().then(() => {
+                  window.location.href = '/login';
+                });
+              }}
+            >
+              <LogoutIcon size={16} />
+            </button>
           </div>
         </div>
 
+        {/* Tap-away close. only-mobile because the drawer itself does not exist above 860px. */}
+        {navOpen && (
+          <div className="sidebar-scrim only-mobile" onClick={() => setNavOpen(false)} />
+        )}
+
         <nav
-          className="scroll-slim"
-          style={{
-            maxWidth: SHELL_MAX,
-            margin: '0 auto',
-            padding: `0 ${SHELL_PAD}`,
-            display: 'flex',
-            gap: '0.25rem',
-            overflowX: 'auto',
-          }}
+          id="admin-nav"
+          // Width and padding come from .admin-nav in globals.css, not from here: the
+          // drawer variant overrides both, and an inline style would outrank it.
+          className={`admin-nav scroll-slim${navOpen ? ' admin-nav--open' : ''}`}
         >
+          {/*
+            The drawer overlays the header, so the hamburger that opened it is underneath.
+            Escape and the scrim both close it, but neither is discoverable by looking —
+            hence a visible close on the panel itself.
+          */}
+          <div
+            className="only-mobile"
+            style={{
+              display: navOpen ? 'flex' : 'none',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '0.25rem 0.75rem 0.5rem',
+            }}
+          >
+            <span
+              style={{
+                fontSize: '0.6875rem',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              Sections
+            </span>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '0.375rem' }}
+              onClick={() => setNavOpen(false)}
+              aria-label="Close menu"
+            >
+              <XIcon size={16} />
+            </button>
+          </div>
+
           {visibleTabs.map((t) => {
             const isActive = tab === t.id;
             return (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
-                style={{
-                  padding: '0.625rem 0.875rem',
-                  fontSize: '0.875rem',
-                  fontWeight: 600,
-                  color: isActive ? 'var(--primary)' : 'var(--muted-foreground)',
-                  borderBottom: '2px solid',
-                  borderColor: isActive ? 'var(--primary)' : 'transparent',
-                  whiteSpace: 'nowrap',
-                  transition: 'color 0.16s, border-color 0.16s',
+                className="admin-tab"
+                onClick={() => {
+                  setTab(t.id);
+                  // Picking a tab is the drawer's whole purpose; leaving it open
+                  // would cover the thing just chosen.
+                  setNavOpen(false);
                 }}
                 aria-current={isActive ? 'page' : undefined}
               >
@@ -325,12 +530,12 @@ export default function AdminPage() {
                 {t.id === 'tickets' && openTickets.length > 0 && (
                   <span
                     style={{
-                      marginLeft: '0.375rem',
                       fontSize: '0.6875rem',
                       background: isActive ? 'var(--primary)' : 'var(--surface-3)',
                       color: isActive ? '#fff' : 'var(--muted-foreground)',
                       padding: '0.0625rem 0.375rem',
                       borderRadius: 999,
+                      marginLeft: 'auto',
                     }}
                   >
                     {openTickets.length}
@@ -339,6 +544,42 @@ export default function AdminPage() {
               </button>
             );
           })}
+
+          {/*
+            The controls the phone header has no room for. Rendered inside the drawer and
+            hidden above 860px, where they live in the header instead — so "Open chat" is
+            a full-width action here rather than a button squeezed against the title.
+          */}
+          <div className="admin-drawer-extras">
+            {user?.email && (
+              <span
+                style={{
+                  fontSize: '0.75rem',
+                  color: 'var(--muted-foreground)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {user.email}
+              </span>
+            )}
+            <a
+              href="/chat"
+              className="btn btn-secondary btn-sm"
+              style={{ width: '100%' }}
+            >
+              Open chat
+            </a>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ width: '100%' }}
+              onClick={toggleTheme}
+            >
+              {theme === 'dark' ? <SunIcon size={15} /> : <MoonIcon size={15} />}
+              {theme === 'dark' ? 'Light theme' : 'Dark theme'}
+            </button>
+          </div>
         </nav>
       </header>
 
@@ -367,9 +608,9 @@ export default function AdminPage() {
                   fontSize: '0.8125rem',
                 }}
               >
-                <strong style={{ color: 'var(--error)' }}>Ticket store unavailable.</strong>{' '}
-                {storeError} Escalations and ratings are not being shown — this is not an empty
-                queue. The knowledge base below is unaffected.
+                <strong style={{ color: 'var(--error)' }}>Store unavailable.</strong>{' '}
+                {storeError} What it covers is not being shown — this is not an empty queue. Other
+                sections are unaffected.
               </div>
             )}
             {tab === 'overview' && (
@@ -380,6 +621,8 @@ export default function AdminPage() {
                 feedbackCount={feedbackCount}
                 faqCount={faqs.length}
                 ai={ai}
+                metrics={metrics}
+                metricsError={metricsError}
               />
             )}
             {tab === 'tickets' && <Tickets tickets={tickets} />}
@@ -417,6 +660,8 @@ function Overview({
   feedbackCount,
   faqCount,
   ai,
+  metrics,
+  metricsError,
 }: {
   digest: ReturnType<typeof buildWeeklyDigest> | null;
   openTickets: Ticket[];
@@ -424,30 +669,57 @@ function Overview({
   feedbackCount: number;
   faqCount: number;
   ai: AiStatus | null;
+  metrics: AdminMetrics | null;
+  metricsError: string | null;
 }) {
-  const weekTotal = VOLUME.reduce((s, d) => s + d.value, 0);
-  const escalationRate = weekTotal > 0 ? totalTickets / weekTotal : 0;
+  // Em dash, not 0, for every measured value that is not in yet. See the metrics
+  // fetch in AdminPage for why the difference is worth carrying this far.
+  const DASH = '—';
+
+  const volume = (metrics?.daily ?? []).map((d) => ({ label: d.label, value: d.questions }));
 
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
       <section
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(190px, 100%), 1fr))',
           gap: '0.875rem',
         }}
       >
         <StatTile
           label="Conversations this week"
-          value={weekTotal.toLocaleString()}
-          delta="12.5% vs last week"
-          deltaGood
+          value={metrics ? metrics.conversations.toLocaleString() : DASH}
+          // Absent when there is no prior week to compare against, rather than
+          // asserting a change of 0% we have not measured.
+          delta={
+            metrics?.deltaPct != null
+              ? `${Math.abs(metrics.deltaPct).toFixed(1)}% vs last week`
+              : undefined
+          }
+          deltaGood={(metrics?.deltaPct ?? 0) >= 0}
+          note={
+            metrics
+              ? `${metrics.questions.toLocaleString()} questions asked`
+              : (metricsError ?? 'Loading…')
+          }
           icon={<SparkIcon size={15} />}
         />
         <StatTile
           label="Resolved without HR"
-          value={`${Math.round((1 - escalationRate) * 100)}%`}
-          note="Answered by the assistant alone"
+          // Both sides of this ratio are now the same seven days. It used to divide
+          // the all-time ticket count by a hardcoded weekly volume, which is why it
+          // sat at 99% regardless of what the assistant actually did.
+          value={
+            metrics?.resolvedWithoutHr != null
+              ? `${Math.round(metrics.resolvedWithoutHr)}%`
+              : DASH
+          }
+          note={
+            metrics
+              ? `${metrics.escalations} of ${metrics.conversations} needed a human`
+              : 'Answered by the assistant alone'
+          }
           icon={<CheckCircleIcon size={15} />}
         />
         <StatTile
@@ -467,7 +739,7 @@ function Overview({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))',
           gap: '1.25rem',
         }}
       >
@@ -479,8 +751,23 @@ function Overview({
             style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)', marginBottom: '1rem' }}
           >
             Employee queries per day, last 7 days
+            {metrics ? ` · ${metrics.timezone}` : ''}
           </p>
-          <BarChart data={VOLUME} />
+          {/*
+            * An explicit empty state rather than a chart of seven zero-height bars,
+            * which looks like a rendering fault rather than a quiet week.
+            */}
+          {metrics && volume.some((d) => d.value > 0) ? (
+            <BarChart data={volume} />
+          ) : (
+            <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)' }}>
+              {metricsError
+                ? `Volume unavailable — ${metricsError}`
+                : metrics
+                  ? 'No questions asked in the last 7 days.'
+                  : 'Loading…'}
+            </p>
+          )}
         </section>
 
         <section className="card" style={{ padding: '1.125rem' }}>
@@ -580,7 +867,7 @@ function Tickets({ tickets }: { tickets: Ticket[] }) {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(480px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(min(480px, 100%), 1fr))',
           gap: '1rem',
           alignItems: 'start',
         }}
@@ -675,7 +962,7 @@ function TicketRow({ ticket }: { ticket: Ticket }) {
       <dl
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))',
           gap: '0.625rem 1rem',
           fontSize: '0.8125rem',
           marginBottom: '0.75rem',
@@ -916,7 +1203,7 @@ function Digest({ digest }: { digest: ReturnType<typeof buildWeeklyDigest> | nul
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))',
           gap: '1.25rem',
           alignItems: 'start',
         }}
@@ -1050,6 +1337,8 @@ function Knowledge({
       </datalist>
       <AiEnginePanel ai={ai} onChanged={onChanged} />
 
+      <EmployeeExtractPanel />
+
       <UploadZone category={category} onCategory={setCategory} onChanged={onChanged} />
 
       <AddEntryForm category={category} onCategory={setCategory} onChanged={onChanged} />
@@ -1057,6 +1346,188 @@ function Knowledge({
       <DocumentList docs={kb?.docs ?? []} onChanged={onChanged} />
 
       <BuiltInFaqs faqs={faqs} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Employee extract
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-reads the HR extract workbooks into the employee collection.
+ *
+ * <p>This existed as an endpoint with nothing calling it, which had a real cost: refreshing
+ * an extract meant an engineer pasting a fetch into devtools, so HR could not do it at all.
+ * It is also how a column added to the importer sat unused — the code shipped, the data never
+ * moved, and the assistant kept saying it did not have a figure that was in the spreadsheet.
+ *
+ * <p>Deliberately here rather than on its own tab: this is the other half of "what the
+ * assistant knows". Uploads above are the policy corpus; this is the employee record.
+ */
+function EmployeeExtractPanel() {
+  const [status, setStatus] = useState<EmployeeDataStatus | null>(null);
+  const [report, setReport] = useState<EmployeeImportReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await fetchEmployeeDataStatus());
+    } catch {
+      // A missing count is not worth a banner — the button below still works, and the
+      // import's own result is the thing that matters.
+      setStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    setReport(null);
+    try {
+      const r = await importEmployeeExtract();
+      setReport(r);
+      await load();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Import failed.');
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <section className="card" style={{ padding: '1.125rem', display: 'grid', gap: '0.875rem' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'baseline' }}>
+        <h2 style={{ fontSize: '0.9375rem', fontWeight: 700 }}>Employee data</h2>
+        {status && (
+          <span className="badge badge-info">
+            {status.recordCount.toLocaleString()} records
+          </span>
+        )}
+      </div>
+
+      <p style={{ fontSize: '0.8125rem', color: 'var(--muted-foreground)', lineHeight: 1.5, maxWidth: '62ch' }}>
+        Re-reads the extract workbooks from the configured directory. Run this after HR Ops
+        publishes a new extract — the assistant answers questions about someone&apos;s own
+        salary, leave and attendance from these records, and it can only report what the last
+        import brought in.
+      </p>
+
+      {/*
+        A confirm step, because this replaces the collection rather than merging into it —
+        by design, so that people who have left do not linger — and a stray click would drop
+        every record until the next successful read.
+      */}
+      {!confirming ? (
+        <div>
+          <button className="btn btn-secondary btn-sm" onClick={() => setConfirming(true)} disabled={busy}>
+            <RefreshIcon size={14} />
+            Re-import extract
+          </button>
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gap: '0.625rem',
+            padding: '0.875rem',
+            borderRadius: 'var(--radius)',
+            background: 'var(--warning-soft)',
+            border: '1px solid var(--border)',
+          }}
+        >
+          <p style={{ fontSize: '0.8125rem', fontWeight: 600, lineHeight: 1.45 }}>
+            This replaces all employee records with what the workbooks currently say. Anyone
+            absent from the new extract disappears from the assistant.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button className="btn btn-primary btn-sm" onClick={() => void run()} disabled={busy}>
+              {busy ? 'Importing…' : 'Yes, re-import'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setConfirming(false)} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <p style={{ fontSize: '0.8125rem', color: 'var(--error-ink)', lineHeight: 1.5 }}>
+          <strong>Import failed.</strong> {error}
+        </p>
+      )}
+
+      {/*
+        The reconciliation numbers, not a bare "done". "5,000 imported, 5,000 matched on
+        compensation" is the evidence the records match the extract; an import that silently
+        dropped 40 rows would also have returned success.
+      */}
+      {report && (
+        <div style={{ display: 'grid', gap: '0.625rem' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(150px, 100%), 1fr))',
+              gap: '0.625rem',
+            }}
+          >
+            <ReportStat label="Imported" value={report.imported} />
+            <ReportStat label="Master rows" value={report.masterRows} />
+            <ReportStat label="Compensation matched" value={report.compensationMatched} />
+            <ReportStat label="Leave matched" value={report.leaveMatched} />
+            <ReportStat label="Attendance matched" value={report.attendanceMatched} />
+            <ReportStat label="Unresolvable" value={report.unresolvable} bad={report.unresolvable > 0} />
+          </div>
+
+          {report.emailDomainRewrite && (
+            <p style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+              Email domain rewritten: {report.emailDomainRewrite}
+            </p>
+          )}
+
+          {report.warnings.length > 0 && (
+            <div style={{ display: 'grid', gap: '0.3125rem' }}>
+              <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--warning-ink)' }}>
+                {report.warnings.length} warning{report.warnings.length === 1 ? '' : 's'}
+              </p>
+              <ul style={{ display: 'grid', gap: '0.25rem', paddingLeft: '1.125rem' }}>
+                {report.warnings.map((w, i) => (
+                  <li key={i} style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', lineHeight: 1.5 }}>
+                    {w}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReportStat({ label, value, bad }: { label: string; value: number; bad?: boolean }) {
+  return (
+    <div>
+      <p
+        style={{
+          fontSize: '1.125rem',
+          fontWeight: 700,
+          fontVariantNumeric: 'tabular-nums',
+          color: bad ? 'var(--error-ink)' : 'var(--foreground)',
+        }}
+      >
+        {value.toLocaleString()}
+      </p>
+      <p className="label-caps" style={{ fontSize: '0.625rem' }}>
+        {label}
+      </p>
     </div>
   );
 }
@@ -1144,7 +1615,7 @@ function AiEnginePanel({
       <dl
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(150px, 100%), 1fr))',
           gap: '0.625rem 1rem',
           fontSize: '0.8125rem',
         }}
@@ -1921,7 +2392,7 @@ function Access() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(440px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(440px, 100%), 1fr))',
           gap: '1.25rem',
           alignItems: 'start',
         }}
@@ -2783,7 +3254,10 @@ function SignIns() {
         ) : (
           // Its own scroll container: the page body must never scroll sideways.
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            {/* .table-stack turns these rows into cards under 861px — see globals.css.
+                Each cell carries a data-label, which is where the dropped column
+                headings reappear. */}
+            <table className="table-stack">
               <thead>
                 <tr>
                   <th style={head}>Employee</th>
@@ -2802,14 +3276,18 @@ function SignIns() {
                         {row.email}
                       </div>
                     </td>
-                    <td style={{ ...cell, color: 'var(--muted-foreground)' }}>
+                    <td data-label="Code" style={{ ...cell, color: 'var(--muted-foreground)' }}>
                       {row.employeeCode ?? '—'}
                     </td>
-                    <td style={cell} title={exactTime(row.lastLoginAt)}>
+                    <td data-label="Last sign-in" style={cell} title={exactTime(row.lastLoginAt)}>
                       {timeAgo(row.lastLoginAt)}
                     </td>
-                    <td style={cell}>{row.loginCount}</td>
-                    <td style={{ ...cell, color: 'var(--muted-foreground)' }}>{row.method}</td>
+                    <td data-label="Sign-ins" style={cell}>
+                      {row.loginCount}
+                    </td>
+                    <td data-label="Method" style={{ ...cell, color: 'var(--muted-foreground)' }}>
+                      {row.method}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2938,7 +3416,7 @@ function UsersPanel({
               style={{ marginTop: '0.25rem' }}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Ananya Sharma"
+              placeholder="Full name, as it appears in Entra"
             />
           </label>
         </div>

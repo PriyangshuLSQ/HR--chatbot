@@ -5,8 +5,10 @@ import com.leadsquared.hr.knowledge.iam.IamService;
 import com.leadsquared.hr.knowledge.model.LoginRecord;
 import com.leadsquared.hr.knowledge.model.Permissions;
 import com.leadsquared.hr.knowledge.security.AuthProperties;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -185,6 +187,42 @@ public class AuthController {
 
     log.warn("Dev sign-in used for {} — Entra bypass is active on this instance.", user.email());
     return ResponseEntity.ok(user);
+  }
+
+  /**
+   * Ends the session.
+   *
+   * <p>This exists because {@code POST /api/auth/logout} was a 404 on any deployment not running
+   * Entra. The route was configured only inside Spring Security's filter chain, and {@link
+   * SecurityConfig} returns early — before {@code .logout(...)} is reached — whenever sign-in is
+   * unusable. So in exactly the posture that has a dev stand-in and no Entra, signing out did
+   * this: the browser POSTed, got a 404, {@code chatbot-auth.tsx} swallowed it in a bare
+   * {@code catch}, cleared its own state and navigated to /login — where {@code /api/auth/me} was
+   * asked again, the untouched cookie still named a valid session, and the redirect effect sent
+   * the employee straight back into the app. The button looked like it worked and the session
+   * outlived it.
+   *
+   * <p>A controller method rather than another security-chain entry, because it has to work in
+   * both postures. Where the chain IS built its {@code LogoutFilter} matches this path first and
+   * handles the request without reaching the dispatcher, so this is the open-mode path only —
+   * the two do the same three things and cannot disagree about the outcome.
+   */
+  @PostMapping("/logout")
+  public ResponseEntity<?> logout(HttpServletRequest request, HttpServletResponse response) {
+    HttpSession session = request.getSession(false);
+    if (session != null) session.invalidate();
+    SecurityContextHolder.clearContext();
+
+    // The session is already dead server-side, so this is only tidiness in the browser — but
+    // without it the dead id is presented on every subsequent request and shows up in logs as
+    // an authentication attempt.
+    Cookie cleared = new Cookie("JSESSIONID", "");
+    cleared.setPath("/");
+    cleared.setMaxAge(0);
+    cleared.setHttpOnly(true);
+    response.addCookie(cleared);
+
+    return ResponseEntity.ok(Map.of("ok", true));
   }
 
   /** Puts a resolved identity into a fresh session, for both non-Entra sign-in paths. */

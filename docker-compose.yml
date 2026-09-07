@@ -115,7 +115,7 @@ services:
       # Answer writing and OCR. Blank is a supported state — answers degrade to
       # extractive rather than failing.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-4-5}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5}
       KNOWLEDGE_CLAUDE_EFFORT: ${KNOWLEDGE_CLAUDE_EFFORT:-low}
 
       # Where the browser is, which is what the Entra redirect URI must match.

@@ -18,6 +18,8 @@ import com.leadsquared.hr.knowledge.model.KnowledgeDoc;
 import com.leadsquared.hr.knowledge.model.RetrievedChunk;
 import com.leadsquared.hr.knowledge.model.SourceKind;
 import com.leadsquared.hr.knowledge.ollama.OllamaClient;
+import com.leadsquared.hr.knowledge.payroll.FunctionPayPlanService;
+import com.leadsquared.hr.knowledge.payroll.FunctionPayAdvisor;
 import com.leadsquared.hr.knowledge.ollama.OllamaStatus;
 import com.leadsquared.hr.knowledge.parse.ImageTextExtractor;
 import com.leadsquared.hr.knowledge.retrieve.Retriever;
@@ -76,7 +78,23 @@ class FollowUpRetrievalTest {
     when(claude.model()).thenReturn("claude-haiku-4-5");
     when(claude.chat(any())).thenReturn("Leave over 10 working days needs HRBP sign-off.");
 
-    rag = new RagService(store, qdrant, retriever, ollama, claude, mock(ImageTextExtractor.class));
+    // Retrieval scoping is inert here: these tests are about the follow-up retry decision, and
+    // a null plan key means no document is demoted. Mocked rather than stubbed so a future
+    // change that starts consulting them fails loudly instead of silently scoping nothing.
+    FunctionPayAdvisor functionPay = mock(FunctionPayAdvisor.class);
+    FunctionPayPlanService payPlans = mock(FunctionPayPlanService.class);
+    when(functionPay.planKeyFor(any(), any())).thenReturn(null);
+
+    rag =
+        new RagService(
+            store,
+            qdrant,
+            retriever,
+            ollama,
+            claude,
+            mock(ImageTextExtractor.class),
+            functionPay,
+            payPlans);
   }
 
   private static KnowledgeDoc doc() {
@@ -111,8 +129,17 @@ class FollowUpRetrievalTest {
     return new Retriever.Result(List.of(), 0.11, false);
   }
 
+  /**
+   * Stubs the seven-argument overload, which is the one RagService calls.
+   *
+   * <p>Worth stating because getting it wrong is silent: stubbing the five-argument signature
+   * leaves the real call unmatched, Mockito returns null, and the failure surfaces as an NPE
+   * inside logRetrieval rather than as "your stub does not match". The two extra arguments are
+   * the retrieval-scoping plan key and the document-owner map.
+   */
   private void stub(String query, Retriever.Result result) {
-    when(retriever.retrieve(eq(query), any(), any(), anyBoolean(), anyInt())).thenReturn(result);
+    when(retriever.retrieve(eq(query), any(), any(), anyBoolean(), anyInt(), any(), any()))
+        .thenReturn(result);
   }
 
   private KnowledgeAnswer askFollowUp() {
@@ -134,7 +161,7 @@ class FollowUpRetrievalTest {
     // Previously this was KnowledgeAnswer.none, which is what put the topic menu on screen.
     assertThat(answer.mode()).isEqualTo(KnowledgeAnswer.Mode.GENERATED);
     assertThat(answer.answer()).contains("HRBP");
-    verify(retriever).retrieve(eq(WIDENED), any(), any(), anyBoolean(), anyInt());
+    verify(retriever).retrieve(eq(WIDENED), any(), any(), anyBoolean(), anyInt(), any(), any());
   }
 
   @Test
@@ -164,7 +191,7 @@ class FollowUpRetrievalTest {
     KnowledgeAnswer answer = askFollowUp();
 
     assertThat(answer.mode()).isEqualTo(KnowledgeAnswer.Mode.GENERATED);
-    verify(retriever, times(1)).retrieve(any(), any(), any(), anyBoolean(), anyInt());
+    verify(retriever, times(1)).retrieve(any(), any(), any(), anyBoolean(), anyInt(), any(), any());
   }
 
   @Test
@@ -175,7 +202,7 @@ class FollowUpRetrievalTest {
     KnowledgeAnswer answer = rag.ask(FOLLOW_UP, List.of(), false, null);
 
     assertThat(answer.mode()).isEqualTo(KnowledgeAnswer.Mode.NONE);
-    verify(retriever, times(1)).retrieve(any(), any(), any(), anyBoolean(), anyInt());
+    verify(retriever, times(1)).retrieve(any(), any(), any(), anyBoolean(), anyInt(), any(), any());
   }
 
   @Test
@@ -189,7 +216,7 @@ class FollowUpRetrievalTest {
     KnowledgeAnswer answer = askFollowUp();
 
     assertThat(answer.mode()).isEqualTo(KnowledgeAnswer.Mode.NONE);
-    verify(retriever, times(2)).retrieve(any(), any(), any(), anyBoolean(), anyInt());
+    verify(retriever, times(2)).retrieve(any(), any(), any(), anyBoolean(), anyInt(), any(), any());
   }
 
   @Test
@@ -210,6 +237,6 @@ class FollowUpRetrievalTest {
 
     // Skipped past the duplicate to the question before it — widening a query with itself would
     // change nothing and waste a search.
-    verify(retriever).retrieve(eq(WIDENED), any(), any(), anyBoolean(), anyInt());
+    verify(retriever).retrieve(eq(WIDENED), any(), any(), anyBoolean(), anyInt(), any(), any());
   }
 }
